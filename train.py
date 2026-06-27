@@ -4,14 +4,135 @@ from pathlib import Path
 
 import hydra
 import lightning as pl
+import numpy as np
 import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
-from lightning.pytorch.loggers import WandbLogger
+from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from omegaconf import OmegaConf, open_dict
 
 from module import SIGReg
 from utils import get_column_normalizer, get_img_preprocessor, SaveCkptCallback
+
+
+class BalancedInterleaveDataset:
+    """Interleave multiple datasets with equal per-dataset sampling weight."""
+
+    def __init__(self, datasets):
+        if not datasets:
+            raise ValueError("BalancedInterleaveDataset requires at least one dataset.")
+        self.datasets = list(datasets)
+        self._per_dataset_len = min(len(dataset) for dataset in self.datasets)
+        self._transform = None
+
+    @property
+    def column_names(self):
+        return self.datasets[0].column_names
+
+    @property
+    def lengths(self):
+        return np.concatenate([dataset.lengths for dataset in self.datasets])
+
+    @property
+    def offsets(self):
+        return np.concatenate([dataset.offsets for dataset in self.datasets])
+
+    @property
+    def transform(self):
+        return self._transform
+
+    @transform.setter
+    def transform(self, value):
+        self._transform = value
+        for dataset in self.datasets:
+            dataset.transform = value
+
+    def __len__(self):
+        return self._per_dataset_len * len(self.datasets)
+
+    def _loc(self, idx):
+        if idx < 0:
+            idx += len(self)
+        dataset_idx = idx % len(self.datasets)
+        local_idx = (idx // len(self.datasets)) % self._per_dataset_len
+        return dataset_idx, local_idx
+
+    def __getitem__(self, idx):
+        dataset_idx, local_idx = self._loc(idx)
+        return self.datasets[dataset_idx][local_idx]
+
+    def __getitems__(self, indices):
+        return [self[idx] for idx in indices]
+
+    def get_col_data(self, col):
+        balanced = []
+        min_rows = min(len(dataset.get_col_data(col)) for dataset in self.datasets)
+        for dataset in self.datasets:
+            balanced.append(dataset.get_col_data(col)[:min_rows])
+        return np.concatenate(balanced, axis=0)
+
+    def get_dim(self, col):
+        return self.datasets[0].get_dim(col)
+
+
+def resolve_dataset_location(dataset_name: str, cache_dir: str | None):
+    """Make local HDF5 dataset resolution tolerant to common env/config slips."""
+    resolved_cache = Path(cache_dir).expanduser() if cache_dir else None
+
+    # load_dataset(cache_dir=...) appends "datasets" internally. If the shell
+    # still points LOCAL_DATASET_DIR at that leaf, use its parent as the cache root.
+    if resolved_cache is not None and resolved_cache.name == "datasets":
+        resolved_cache = resolved_cache.parent
+
+    if resolved_cache is None:
+        datasets_dir = Path(os.environ.get("STABLEWM_HOME", "~/.stable_worldmodel")).expanduser() / "datasets"
+    else:
+        datasets_dir = resolved_cache / "datasets"
+
+    name_path = Path(dataset_name)
+    if name_path.exists():
+        return str(name_path), str(resolved_cache) if resolved_cache else cache_dir
+
+    local = name_path if name_path.is_absolute() else datasets_dir / name_path
+    if local.exists():
+        return dataset_name, str(resolved_cache) if resolved_cache else cache_dir
+
+    if name_path.suffix == "":
+        h5_name = f"{dataset_name}.h5"
+        h5_local = datasets_dir / h5_name
+        if h5_local.exists():
+            return h5_name, str(resolved_cache) if resolved_cache else cache_dir
+
+    return dataset_name, str(resolved_cache) if resolved_cache else cache_dir
+
+
+def load_train_dataset(dataset_cfg, cache_dir):
+    dataset_cfg = dict(dataset_cfg)
+    dataset_names = dataset_cfg.pop("names", None)
+    balance = dataset_cfg.pop("balance", None)
+
+    if dataset_names is None:
+        dataset_name = dataset_cfg.pop("name")
+        dataset_name, cache_dir = resolve_dataset_location(dataset_name, cache_dir)
+        return swm.data.load_dataset(
+            dataset_name, transform=None, cache_dir=cache_dir, **dataset_cfg
+        )
+
+    datasets = []
+    for dataset_name in dataset_names:
+        resolved_name, resolved_cache_dir = resolve_dataset_location(dataset_name, cache_dir)
+        datasets.append(
+            swm.data.load_dataset(
+                resolved_name, transform=None, cache_dir=resolved_cache_dir, **dataset_cfg
+            )
+        )
+
+    if balance == "interleave":
+        return BalancedInterleaveDataset(datasets)
+
+    from stable_worldmodel.data.dataset import ConcatDataset
+
+    return ConcatDataset(datasets)
 
 
 def lejepa_forward(self, batch, stage, cfg):
@@ -51,11 +172,8 @@ def run(cfg):
     #########################
 
     dataset_cfg = OmegaConf.to_container(cfg.data.dataset, resolve=True)
-    dataset_name = dataset_cfg.pop("name")
     cache_dir = os.environ.get("LOCAL_DATASET_DIR", None)
-    dataset = swm.data.load_dataset(
-        dataset_name, transform=None, cache_dir=cache_dir, **dataset_cfg
-    )
+    dataset = load_train_dataset(dataset_cfg, cache_dir)
     transforms = [get_img_preprocessor(source='pixels', target='pixels', img_size=cfg.img_size)]
     
     with open_dict(cfg):
@@ -108,9 +226,12 @@ def run(cfg):
     run_id = cfg.get("subdir") or ""
     run_dir = Path(swm.data.utils.get_cache_dir(sub_folder='checkpoints'), run_id)
 
-    logger = None
+    loggers = []
     if cfg.wandb.enabled:
-        logger = WandbLogger(**cfg.wandb.config)
+        loggers.append(WandbLogger(**cfg.wandb.config))
+    if cfg.tensorboard.enabled:
+        loggers.append(TensorBoardLogger(**cfg.tensorboard.config))
+    for logger in loggers:
         logger.log_hyperparams(OmegaConf.to_container(cfg))
 
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -125,7 +246,7 @@ def run(cfg):
         **cfg.trainer,
         callbacks=[object_dump_callback],
         num_sanity_val_steps=1,
-        logger=logger,
+        logger=loggers or None,
         enable_checkpointing=True,
     )
 

@@ -13,3 +13,10 @@ wandb:
     id: ${subdir}
     resume: allow
     log_model: False
+
+tensorboard:
+  enabled: False
+  config:
+    save_dir: ${oc.env:SPT_CACHE_DIR,/home/hall/code/.stable-pretraining}/tensorboard
+    name: ${output_model_name}
+    version: ${subdir}
