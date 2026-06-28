@@ -1,0 +1,862 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LeWM + IsaacLab Cartpole 在线部署推理教程</title>
+  <style>
+    :root {
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #647084;
+      --line: #d9dee7;
+      --blue: #1769aa;
+      --blue-soft: #e8f2fb;
+      --green: #14746f;
+      --green-soft: #e4f6f3;
+      --amber: #a65f00;
+      --amber-soft: #fff2d8;
+      --red: #b4233a;
+      --red-soft: #fde7eb;
+      --violet: #5b4bb7;
+      --violet-soft: #efedff;
+      --shadow: 0 14px 32px rgba(23, 32, 51, 0.08);
+      --radius: 8px;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: Inter, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+      line-height: 1.65;
+    }
+
+    header {
+      background: #101827;
+      color: #f8fafc;
+      padding: 28px 32px 24px;
+      border-bottom: 4px solid #2f80ed;
+    }
+
+    header h1 {
+      margin: 0 0 8px;
+      font-size: clamp(28px, 4vw, 44px);
+      letter-spacing: 0;
+    }
+
+    header p {
+      margin: 0;
+      max-width: 1060px;
+      color: #cbd5e1;
+      font-size: 16px;
+    }
+
+    main {
+      width: min(1480px, calc(100vw - 28px));
+      margin: 22px auto 48px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: 320px minmax(0, 1fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    nav {
+      position: sticky;
+      top: 14px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 14px;
+    }
+
+    nav a {
+      display: block;
+      text-decoration: none;
+      color: var(--ink);
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-weight: 700;
+      font-size: 14px;
+    }
+
+    nav a:hover { background: var(--blue-soft); color: var(--blue); }
+
+    section {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      margin-bottom: 18px;
+      overflow: hidden;
+    }
+
+    .section-head {
+      padding: 18px 22px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 16px;
+      flex-wrap: wrap;
+    }
+
+    h2, h3, p { margin-top: 0; }
+    h2 { font-size: 23px; margin-bottom: 4px; }
+    h3 { font-size: 18px; margin-bottom: 8px; }
+    .hint { color: var(--muted); font-size: 14px; margin: 0; }
+
+    .content { padding: 20px 22px 24px; }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .three-col {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      padding: 14px;
+    }
+
+    .card.blue { background: var(--blue-soft); border-color: #b8d8f3; }
+    .card.green { background: var(--green-soft); border-color: #b7ded8; }
+    .card.amber { background: var(--amber-soft); border-color: #ead29b; }
+    .card.red { background: var(--red-soft); border-color: #f1b8c3; }
+    .card.violet { background: var(--violet-soft); border-color: #cbc6f8; }
+
+    code, pre {
+      font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+    }
+
+    code {
+      background: #eef2f7;
+      padding: 2px 5px;
+      border-radius: 5px;
+      font-size: 0.92em;
+    }
+
+    pre {
+      margin: 10px 0 0;
+      background: #0f172a;
+      color: #e2e8f0;
+      border-radius: 8px;
+      padding: 14px;
+      overflow-x: auto;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .diagram-wrap {
+      display: grid;
+      grid-template-columns: minmax(0, 1.7fr) minmax(320px, 0.9fr);
+      gap: 16px;
+    }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(150px, 1fr));
+      gap: 12px;
+      align-items: stretch;
+    }
+
+    .node {
+      border: 2px solid var(--line);
+      border-radius: 8px;
+      padding: 13px;
+      background: #fff;
+      min-height: 126px;
+      cursor: pointer;
+      transition: transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .node:hover, .node.active {
+      transform: translateY(-2px);
+      border-color: var(--blue);
+      box-shadow: 0 10px 20px rgba(23, 105, 170, 0.14);
+    }
+
+    .node .title {
+      font-weight: 800;
+      font-size: 16px;
+      margin-bottom: 8px;
+    }
+
+    .node .meta {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .node.env { background: var(--green-soft); }
+    .node.model { background: var(--blue-soft); }
+    .node.search { background: var(--violet-soft); }
+    .node.cost { background: var(--amber-soft); }
+    .node.risk { background: var(--red-soft); }
+
+    .detail {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 16px;
+      min-height: 260px;
+      background: #fbfcfe;
+    }
+
+    .detail h3 { margin-bottom: 6px; }
+    .detail ul { padding-left: 18px; margin: 8px 0 0; }
+
+    .tabs, .toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      font: inherit;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px 11px;
+      background: #fff;
+      color: var(--ink);
+      cursor: pointer;
+      font-weight: 800;
+    }
+
+    button:hover, button.active {
+      color: #fff;
+      background: var(--blue);
+      border-color: var(--blue);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 9px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th { background: #f1f5f9; }
+
+    .metric {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .metric .item {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 12px;
+      background: #fff;
+    }
+
+    .metric .value {
+      display: block;
+      font-size: 23px;
+      font-weight: 900;
+      color: var(--blue);
+      line-height: 1.2;
+    }
+
+    .formula {
+      background: #f8fafc;
+      border: 1px dashed #b6c1d1;
+      border-radius: 8px;
+      padding: 12px;
+      margin: 10px 0;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 800;
+      background: #e8eef6;
+      color: #334155;
+      margin-right: 5px;
+      margin-bottom: 5px;
+    }
+
+    .callout {
+      border-left: 5px solid var(--blue);
+      background: #f7fbff;
+      padding: 12px 14px;
+      border-radius: 6px;
+      margin: 12px 0;
+    }
+
+    .callout.warn { border-left-color: var(--amber); background: #fffaf0; }
+    .callout.bad { border-left-color: var(--red); background: #fff4f6; }
+
+    .hidden { display: none; }
+
+    @media (max-width: 1100px) {
+      .grid, .diagram-wrap, .two-col, .three-col {
+        grid-template-columns: 1fr;
+      }
+      nav { position: static; }
+      .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .metric { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (max-width: 620px) {
+      header { padding: 22px 18px; }
+      main { width: min(100% - 16px, 1480px); }
+      .content, .section-head { padding-left: 14px; padding-right: 14px; }
+      .pipeline, .metric { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>LeWM + IsaacLab Cartpole 在线部署推理教程</h1>
+    <p>这份 HTML 用当前项目里的真实脚本和实验结果，讲清楚 LeWM 世界模型如何在 IsaacLab 里做在线 MPC 控制，为什么要加 action prior / edge rescue，以及如何根据失败现象调参。</p>
+  </header>
+
+  <main class="grid">
+    <nav>
+      <a href="#overview">整体架构</a>
+      <a href="#pipeline">点击式数据流</a>
+      <a href="#components">组件拆解</a>
+      <a href="#cost">Cost 与控制技巧</a>
+      <a href="#examples">参数案例</a>
+      <a href="#diagnosis">诊断方法</a>
+      <a href="#commands">常用命令</a>
+      <a href="#next">下一步</a>
+    </nav>
+
+    <div>
+      <section id="overview">
+        <div class="section-head">
+          <div>
+            <h2>1. 当前系统一句话</h2>
+            <p class="hint">它不是直接让网络输出 action，而是让 LeWM 预测未来 latent，再用 MPC 搜索动作。</p>
+          </div>
+        </div>
+        <div class="content">
+          <div class="two-col">
+            <div class="card blue">
+              <h3>在线闭环</h3>
+              <p>每个 IsaacLab step 都重新拿相机图像，重新规划动作，只执行最优动作序列的第一步。</p>
+              <pre><code>pixels, state = env.observe()
+action = mpc_plan(pixels, state)
+env.step(action)</code></pre>
+            </div>
+            <div class="card green">
+              <h3>LeWM 的角色</h3>
+              <p>LeWM 不是 policy。它负责回答：如果接下来执行这串动作，未来 latent 会变成什么样。</p>
+              <pre><code>pixels -> encoder -> emb
+actions -> action_encoder -> act_emb
+emb + act_emb -> predictor -> pred_emb</code></pre>
+            </div>
+          </div>
+
+          <div class="callout">
+            <strong>当前最重要的结论：</strong>这套系统已经能在接近平衡的初始状态下接近稳定控制，曾跑到 <code>299 / 300</code> steps；但初始 pole 角达到 <code>0.32~0.38 rad</code> 时，恢复能力仍不足。
+          </div>
+
+          <div class="metric">
+            <div class="item"><span class="value">221</span>h4 baseline 平均存活步数</div>
+            <div class="item"><span class="value">299</span>最佳单条 episode 存活步数</div>
+            <div class="item"><span class="value">0.064</span>最佳单条 mean cart</div>
+            <div class="item"><span class="value">0.013</span>最佳单条 mean pole angle</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="pipeline">
+        <div class="section-head">
+          <div>
+            <h2>2. 点击式数据流</h2>
+            <p class="hint">点击每个框，右侧会显示它在代码里的对应位置和作用。</p>
+          </div>
+          <div class="toolbar">
+            <button data-run="0">从头播放</button>
+            <button data-run="stop">停止高亮</button>
+          </div>
+        </div>
+        <div class="content diagram-wrap">
+          <div class="pipeline" id="pipelineNodes">
+            <div class="node env active" data-key="env">
+              <div>
+                <div class="title">IsaacLab 环境</div>
+                <div class="meta">Cartpole + RGB Camera</div>
+              </div>
+              <code>env.step(action)</code>
+            </div>
+            <div class="node model" data-key="pixels">
+              <div>
+                <div class="title">图像预处理</div>
+                <div class="meta">HWC / CHW -> 224 -> normalize</div>
+              </div>
+              <code>preprocess_pixels</code>
+            </div>
+            <div class="node model" data-key="encoder">
+              <div>
+                <div class="title">LeWM Encoder</div>
+                <div class="meta">pixels -> emb</div>
+              </div>
+              <code>model.encode</code>
+            </div>
+            <div class="node search" data-key="cem">
+              <div>
+                <div class="title">CEM 采样动作</div>
+                <div class="meta">2048 candidates × horizon 4</div>
+              </div>
+              <code>choose_action</code>
+            </div>
+            <div class="node model" data-key="action">
+              <div>
+                <div class="title">Action Encoder</div>
+                <div class="meta">raw action -> normalized -> act_emb</div>
+              </div>
+              <code>action_encoder</code>
+            </div>
+            <div class="node model" data-key="rollout">
+              <div>
+                <div class="title">Online Rollout</div>
+                <div class="meta">修正 action 时间对齐</div>
+              </div>
+              <code>rollout_predictions_online</code>
+            </div>
+            <div class="node cost" data-key="cost">
+              <div>
+                <div class="title">Cost 计算</div>
+                <div class="meta">latent target + prior + edge</div>
+              </div>
+              <code>latent_candidate_cost</code>
+            </div>
+            <div class="node env" data-key="execute">
+              <div>
+                <div class="title">执行第一步</div>
+                <div class="meta">receding horizon control</div>
+              </div>
+              <code>best_action[0]</code>
+            </div>
+          </div>
+
+          <aside class="detail" id="nodeDetail"></aside>
+        </div>
+      </section>
+
+      <section id="components">
+        <div class="section-head">
+          <div>
+            <h2>3. 组件拆解</h2>
+            <p class="hint">每个组件对应一个明确的代码位置。</p>
+          </div>
+        </div>
+        <div class="content">
+          <div class="three-col">
+            <div class="card">
+              <h3>部署主脚本</h3>
+              <p><code>scripts/isaaclab_lewm_mpc_cartpole.py</code></p>
+              <p>负责 IsaacLab 环境创建、模型加载、MPC 搜索、step 循环、GIF 与 JSON 输出。</p>
+            </div>
+            <div class="card">
+              <h3>共享工具</h3>
+              <p><code>scripts/lewm_isaaclab_common.py</code></p>
+              <p>包含加载 checkpoint、图像预处理、action 标准化、online rollout 等通用逻辑。</p>
+            </div>
+            <div class="card">
+              <h3>参数搜索</h3>
+              <p><code>scripts/sweep_isaaclab_mpc_cartpole.py</code></p>
+              <p>批量跑多组 MPC 参数，按 survival / cart / pole 打分排序。</p>
+            </div>
+          </div>
+
+          <h3 style="margin-top:18px;">LeWM 推理内部结构</h3>
+          <table>
+            <thead>
+              <tr><th>模块</th><th>输入</th><th>输出</th><th>用途</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>encoder</code></td>
+                <td>图像序列 <code>pixels</code></td>
+                <td><code>emb</code></td>
+                <td>把视觉观测压到 latent 空间。</td>
+              </tr>
+              <tr>
+                <td><code>action_encoder</code></td>
+                <td>标准化后的动作序列</td>
+                <td><code>act_emb</code></td>
+                <td>把连续动作映射到和 latent 对齐的动作 embedding。</td>
+              </tr>
+              <tr>
+                <td><code>predictor</code></td>
+                <td><code>ctx_emb + ctx_act</code></td>
+                <td><code>pred_emb</code></td>
+                <td>预测未来 latent，是 MPC rollout 的核心。</td>
+              </tr>
+              <tr>
+                <td><code>SIGReg</code></td>
+                <td>训练期 embedding</td>
+                <td>正则 loss</td>
+                <td>让 latent 分布更稳定，推理时不直接用。</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="cost">
+        <div class="section-head">
+          <div>
+            <h2>4. Cost 与控制技巧</h2>
+            <p class="hint">当前控制效果主要来自三个 cost 的组合。</p>
+          </div>
+        </div>
+        <div class="content">
+          <div class="tabs">
+            <button class="active" data-tab="latent">latent-target</button>
+            <button data-tab="prior">action prior</button>
+            <button data-tab="edge">edge rescue</button>
+            <button data-tab="cem">CEM</button>
+          </div>
+
+          <div class="tab-panel" id="tab-latent">
+            <h3>latent-target：让未来接近稳定画面</h3>
+            <p>从稳定数据里挑选接近 upright / centered 的帧，编码成 <code>target_emb</code>，然后让候选动作预测出来的 <code>pred_emb</code> 接近它。</p>
+            <div class="formula">
+              <code>cost_latent = distance(pred_emb, target_emb)</code>
+            </div>
+            <p>优点是直接使用 LeWM 的 latent 空间，不依赖 decoder。缺点是它不天然知道“该往哪边推”。</p>
+          </div>
+
+          <div class="tab-panel hidden" id="tab-prior">
+            <h3>action prior：给 MPC 一个局部救杆方向</h3>
+            <p>根据当前真实 state 计算一个连续动作先验。</p>
+            <div class="formula">
+              <code>score = kp_pole*pole_pos + kd_pole*pole_vel + kp_cart*cart_pos + kd_cart*cart_vel</code><br>
+              <code>a_prior = -score</code><br>
+              <code>cost_prior = weight * (action[0] - a_prior)^2</code>
+            </div>
+            <p>它像一个小的 PD / LQR 提示器，让 CEM 不完全靠 latent cost 摸索方向。</p>
+          </div>
+
+          <div class="tab-panel hidden" id="tab-edge">
+            <h3>edge rescue：小车接近边界时接管</h3>
+            <p>当小车靠近边界且还在向外运动时，鼓励动作往中间拉，同时压低 action prior 的权重。</p>
+            <div class="formula">
+              <code>activation = relu(|cart_pos|-threshold) * (1 + outward_vel)</code><br>
+              <code>target_action = -sign(cart_pos) * return_action</code><br>
+              <code>effective_prior_weight = prior_weight * (1 - edge_gate)</code>
+            </div>
+            <p>这个技巧把失败模式从“cart 出界”转成了“pole 后期发散”，说明它确实解决了边界问题的一部分。</p>
+          </div>
+
+          <div class="tab-panel hidden" id="tab-cem">
+            <h3>CEM：从很多动作序列里筛精英</h3>
+            <p>每一步采样很多候选动作序列，预测未来 latent，计算 cost，选 elite 更新分布。最终只执行第一步。</p>
+            <div class="formula">
+              <code>samples -> rollout -> cost -> top elite -> update mean/std -> repeat</code>
+            </div>
+            <p><code>horizon=4</code> 目前最好；<code>horizon=6</code> 反而变差，说明 LeWM 多步预测误差会影响规划。</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="examples">
+        <div class="section-head">
+          <div>
+            <h2>5. 参数案例</h2>
+            <p class="hint">这些是我们已经跑过并分析过的典型组合。</p>
+          </div>
+        </div>
+        <div class="content">
+          <table>
+            <thead>
+              <tr><th>方案</th><th>核心参数</th><th>结果特征</th><th>适用判断</th></tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>h4 baseline</strong></td>
+                <td><code>horizon=4</code>, <code>kp=2.4</code>, <code>kd=0.6</code>, <code>edge_return=1.0</code></td>
+                <td>平均 <code>221/300</code>，出现过 <code>299/300</code>，cart 最居中。</td>
+                <td>当前最平衡的方案。</td>
+              </tr>
+              <tr>
+                <td><strong>pole30_kd08</strong></td>
+                <td><code>kp=3.0</code>, <code>kd=0.8</code></td>
+                <td>平均 survival 更高一点，但 cart 更偏。</td>
+                <td>更适合救较大的初始 pole 角。</td>
+              </tr>
+              <tr>
+                <td><strong>h6 baseline</strong></td>
+                <td><code>horizon=6</code></td>
+                <td>平均变差，说明预测更远不一定更好。</td>
+                <td>不推荐作为默认。</td>
+              </tr>
+              <tr>
+                <td><strong>return06</strong></td>
+                <td><code>edge_return=0.6</code></td>
+                <td>回中变温和，但 survival 和 cart 都变差。</td>
+                <td>已基本排除。</td>
+              </tr>
+              <tr>
+                <td><strong>direction_bias</strong></td>
+                <td>符号方向强救</td>
+                <td>杆角很小，但动作高频抖动，小车接近出界。</td>
+                <td>适合做对照，不适合作最终方案。</td>
+              </tr>
+            </tbody>
+          </table>
+
+          <div class="callout warn">
+            <strong>重要现象：</strong>同样参数下，初始 pole 角差别很大时结果会差很多。接近 <code>0 rad</code> 时可以接近满分；初始 <code>0.32~0.38 rad</code> 时容易只撑 <code>120</code> 步左右。
+          </div>
+        </div>
+      </section>
+
+      <section id="diagnosis">
+        <div class="section-head">
+          <div>
+            <h2>6. 怎么看结果</h2>
+            <p class="hint">不要只看 reward，要看失败原因。</p>
+          </div>
+        </div>
+        <div class="content two-col">
+          <div class="card">
+            <h3>核心指标</h3>
+            <p><span class="tag">survival_steps</span> 是否接近 300。</p>
+            <p><span class="tag">mean_abs_pole_angle</span> 杆是否稳。</p>
+            <p><span class="tag">mean_abs_cart_pos</span> 小车是否居中。</p>
+            <p><span class="tag">max_cart</span> 是否接近边界。</p>
+            <p><span class="tag">edge_align</span> edge 触发后动作是否朝 target 方向。</p>
+          </div>
+          <div class="card">
+            <h3>典型失败模式</h3>
+            <p><strong>cart 出界：</strong>需要 edge rescue 更早或更强。</p>
+            <p><strong>pole 爆掉：</strong>需要更强 pole prior、更多大角度数据，或更好的 future risk cost。</p>
+            <p><strong>动作抖动：</strong>direction-bias 太强或 action smoothness 太弱。</p>
+            <p><strong>horizon 变长反而差：</strong>LeWM 多步 latent rollout 误差太大。</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="commands">
+        <div class="section-head">
+          <div>
+            <h2>7. 常用命令</h2>
+            <p class="hint">直接复制到 IsaacLab 终端运行。</p>
+          </div>
+        </div>
+        <div class="content">
+          <h3>环境激活</h3>
+          <pre><code>source /home/hall/miniconda3/etc/profile.d/conda.sh
+conda activate env_isaaclab
+export LD_PRELOAD="$LD_PRELOAD:/lib/aarch64-linux-gnu/libgomp.so.1"</code></pre>
+
+          <h3>当前推荐 h4 baseline</h3>
+          <pre><code>python le-wm/scripts/isaaclab_lewm_mpc_cartpole.py \
+  --headless \
+  --device cuda \
+  --objective latent-target \
+  --episodes 3 \
+  --episode-len 300 \
+  --horizon 4 \
+  --num-candidates 2048 \
+  --cem-iters 4 \
+  --force-rescue-candidates \
+  --action-prior-weight 1.2 \
+  --prior-pole-kp 2.4 \
+  --prior-pole-kd 0.6 \
+  --prior-cart-kp 0.08 \
+  --prior-cart-kd 0.02 \
+  --edge-rescue-weight 8.0 \
+  --edge-rescue-threshold 2.3 \
+  --edge-rescue-velocity-threshold 0.2 \
+  --edge-rescue-return-action 1.0 \
+  --edge-rescue-prior-suppression 1.0 \
+  --edge-rescue-gate-scale 0.15 \
+  --save-step-diagnostics \
+  --save-gif \
+  --gif-out /home/hall/code/.stable-wm/visualizations/lewm_mpc_cartpole_h4_baseline.gif \
+  --out /home/hall/code/.stable-wm/eval/lewm_mpc_cartpole_h4_baseline.json</code></pre>
+
+          <h3>自动 sweep</h3>
+          <pre><code>python le-wm/scripts/sweep_isaaclab_mpc_cartpole.py \
+  --python python \
+  --device cuda \
+  --episodes 3 \
+  --episode-len 300 \
+  --save-gif-best \
+  --skip-existing</code></pre>
+        </div>
+      </section>
+
+      <section id="next">
+        <div class="section-head">
+          <div>
+            <h2>8. 下一步建议</h2>
+            <p class="hint">现在最值得做的是补足大角度恢复能力。</p>
+          </div>
+        </div>
+        <div class="content">
+          <div class="three-col">
+            <div class="card green">
+              <h3>短期调参</h3>
+              <p>针对初始大倾角，试 <code>prior_pole_kp=3.0</code>、<code>prior_pole_kd=0.8</code>，观察是否能救回 <code>0.3 rad</code> 以上的初始角。</p>
+            </div>
+            <div class="card blue">
+              <h3>数据增强</h3>
+              <p>采集大倾角恢复数据，尤其是 pole angle 大、pole velocity 大时 PPO 如何救杆。</p>
+            </div>
+            <div class="card amber">
+              <h3>模型增强</h3>
+              <p>增加 termination risk 或 future pole risk 的预测头，让 MPC 不只看 latent target。</p>
+            </div>
+          </div>
+          <div class="callout bad">
+            <strong>当前边界：</strong>这还不是纯视觉控制。当前 action prior 和 edge rescue 使用真实 state。后续如果要更“世界模型味”，需要把这些 state 估计也迁到视觉 latent / probe 上。
+          </div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script>
+    const details = {
+      env: {
+        title: "IsaacLab 环境",
+        body: [
+          "任务是 Isaac-Cartpole-RGB-Camera-Direct-v0。",
+          "每一步拿到相机 pixels 和真实 state。",
+          "真实 state 当前用于 action prior / edge rescue / diagnostics，不是 PPO policy。"
+        ],
+        code: "obs = env.reset()\ntrue_state = get_cartpole_state(env)\npixel = get_pixels(obs, pixel_key, num_envs)"
+      },
+      pixels: {
+        title: "图像预处理",
+        body: [
+          "把 IsaacLab 的图像整理成 LeWM encoder 需要的格式。",
+          "包含 HWC/CHW 处理、resize 到 224、ImageNet normalize。",
+          "这一步保证训练和部署输入分布尽量一致。"
+        ],
+        code: "pixels = preprocess_pixels(\n  list(pixel_history),\n  img_size=224,\n  device=device\n)"
+      },
+      encoder: {
+        title: "LeWM Encoder",
+        body: [
+          "输入最近 history_size 帧图像，输出 emb。",
+          "emb 是后续 predictor 的上下文。",
+          "当前 LeWM 不解码图像，控制直接在 latent 空间比较。"
+        ],
+        code: "emb = model.encode({\"pixels\": pixels})[\"emb\"]"
+      },
+      cem: {
+        title: "CEM 采样动作序列",
+        body: [
+          "每个 step 采样 num_candidates 条动作序列。",
+          "用 elite 更新均值和方差，重复 cem_iters 次。",
+          "最终只执行最优序列第一步。"
+        ],
+        code: "samples = mean + std * torch.randn(...)\nelite = samples[topk(cost)]\nmean = elite.mean(dim=0)"
+      },
+      action: {
+        title: "Action Encoder",
+        body: [
+          "候选 raw action 先按训练数据 mean/std 标准化。",
+          "再进入 model.action_encoder 变成 act_emb。",
+          "action 标准化不一致会明显影响 rollout。"
+        ],
+        code: "full_actions = normalize_actions(raw, mean, std)\nact_emb = model.action_encoder(full_actions)"
+      },
+      rollout: {
+        title: "Online Rollout",
+        body: [
+          "rollout_predictions_online 是在线控制的关键修复。",
+          "它保证 candidate[0] 影响第一个 future latent。",
+          "如果错位，MPC 第一拍动作对预测没有影响。"
+        ],
+        code: "pred_emb = rollout_predictions_online(\n  model, emb, act_emb, history_size, horizon\n)"
+      },
+      cost: {
+        title: "Cost 组合",
+        body: [
+          "主 cost 是 latent-target，让未来 latent 接近稳定画面。",
+          "action prior 给出连续救杆方向。",
+          "edge rescue 在小车接近边界时接管。"
+        ],
+        code: "cost = latent_candidate_cost(pred_emb, target_emb)\ncost = add_action_prior(cost, samples, state)\ncost = add_edge_rescue(cost, samples, state)"
+      },
+      execute: {
+        title: "执行第一步",
+        body: [
+          "MPC 不执行完整动作序列，只执行最优序列的第一个 action。",
+          "下一帧重新观察、重新规划。",
+          "这能不断修正 LeWM rollout 的累积误差。"
+        ],
+        code: "best_action = samples[argmin(cost), 0]\nobs, reward, done = env.step(best_action)"
+      }
+    };
+
+    const nodes = Array.from(document.querySelectorAll(".node"));
+    const detail = document.getElementById("nodeDetail");
+    let timer = null;
+
+    function renderDetail(key) {
+      const data = details[key];
+      detail.innerHTML = `
+        <h3>${data.title}</h3>
+        <ul>${data.body.map(item => `<li>${item}</li>`).join("")}</ul>
+        <pre><code>${data.code}</code></pre>
+      `;
+      nodes.forEach(node => node.classList.toggle("active", node.dataset.key === key));
+    }
+
+    nodes.forEach(node => node.addEventListener("click", () => renderDetail(node.dataset.key)));
+    renderDetail("env");
+
+    document.querySelector("[data-run='0']").addEventListener("click", () => {
+      if (timer) clearInterval(timer);
+      let idx = 0;
+      renderDetail(nodes[idx].dataset.key);
+      timer = setInterval(() => {
+        idx = (idx + 1) % nodes.length;
+        renderDetail(nodes[idx].dataset.key);
+      }, 1400);
+    });
+
+    document.querySelector("[data-run='stop']").addEventListener("click", () => {
+      if (timer) clearInterval(timer);
+      timer = null;
+    });
+
+    const tabButtons = Array.from(document.querySelectorAll("[data-tab]"));
+    const panels = Array.from(document.querySelectorAll(".tab-panel"));
+    tabButtons.forEach(button => {
+      button.addEventListener("click", () => {
+        tabButtons.forEach(btn => btn.classList.toggle("active", btn === button));
+        panels.forEach(panel => panel.classList.toggle("hidden", panel.id !== `tab-${button.dataset.tab}`));
+      });
+    });
+  </script>
+</body>
+</html>

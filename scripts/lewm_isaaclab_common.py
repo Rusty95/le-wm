@@ -255,6 +255,39 @@ def rollout_predictions(
     return torch.stack(emb_list[history_size:], dim=1)
 
 
+def rollout_predictions_online(
+    model: torch.nn.Module,
+    emb: torch.Tensor,
+    act_emb: torch.Tensor,
+    history_size: int,
+    max_horizon: int,
+) -> torch.Tensor:
+    """Roll out with candidate[0] affecting the first predicted latent.
+
+    ``emb`` contains the current visual history with length ``history_size``.
+    ``act_emb`` must contain ``history_size - 1 + max_horizon`` actions:
+    the last ``history_size - 1`` executed actions followed by the candidate
+    future actions.  This alignment is useful for online MPC because the first
+    candidate action is the action that will be sent to ``env.step`` now.
+    """
+    expected = history_size - 1 + max_horizon
+    if act_emb.shape[1] != expected:
+        raise ValueError(
+            f"Online rollout expected {expected} action embeddings, got {act_emb.shape[1]} "
+            f"(history_size={history_size}, max_horizon={max_horizon})."
+        )
+
+    emb_list = list(emb[:, :history_size].unbind(dim=1))
+    preds = []
+    for step in range(max_horizon):
+        ctx_emb = torch.stack(emb_list[step : step + history_size], dim=1)
+        ctx_act = act_emb[:, step : step + history_size]
+        pred = model.predict(ctx_emb, ctx_act)[:, -1]
+        emb_list.append(pred)
+        preds.append(pred)
+    return torch.stack(preds, dim=1)
+
+
 class StateProbe(torch.nn.Module):
     def __init__(
         self,
