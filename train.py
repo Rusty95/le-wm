@@ -1,4 +1,5 @@
 import os
+import time
 from functools import partial
 from pathlib import Path
 
@@ -8,11 +9,43 @@ import numpy as np
 import stable_pretraining as spt
 import stable_worldmodel as swm
 import torch
+import torch.nn.functional as F
+from lightning.pytorch.callbacks import LearningRateMonitor
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from omegaconf import OmegaConf, open_dict
 
 from module import SIGReg
 from utils import get_column_normalizer, get_img_preprocessor, SaveCkptCallback
+
+
+class TrainingDiagnosticsCallback(pl.Callback):
+    """Log optimizer health and throughput without changing training."""
+
+    def __init__(self):
+        self._last_batch_end = None
+
+    def on_train_start(self, trainer, pl_module):
+        self._last_batch_end = time.perf_counter()
+
+    def on_before_optimizer_step(self, trainer, pl_module, optimizer):
+        grads = [param.grad.detach().norm(2) for param in pl_module.parameters() if param.grad is not None]
+        if grads:
+            grad_norm = torch.stack(grads).norm(2)
+            pl_module.log("optimization/grad_norm", grad_norm, on_step=True, on_epoch=False)
+
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
+        now = time.perf_counter()
+        if self._last_batch_end is not None:
+            elapsed = max(now - self._last_batch_end, 1e-9)
+            batch_size = int(batch["action"].shape[0])
+            pl_module.log("performance/batches_per_sec", 1.0 / elapsed, on_step=True, on_epoch=False)
+            pl_module.log(
+                "performance/samples_per_sec",
+                batch_size / elapsed,
+                on_step=True,
+                on_epoch=False,
+            )
+        self._last_batch_end = now
 
 
 class BalancedInterleaveDataset:
@@ -156,13 +189,51 @@ def lejepa_forward(self, batch, stage, cfg):
     tgt_emb = emb[:, n_preds:] # label
     pred_emb = self.model.predict(ctx_emb, ctx_act) # pred
 
-    # LeWM loss
-    output["pred_loss"] = (pred_emb - tgt_emb).pow(2).mean()
+    # LeWM loss. External disturbances are not part of the policy action, so
+    # the transition on which an impulse is injected can be excluded while
+    # retaining all subsequent recovery dynamics.
+    pred_error = (pred_emb - tgt_emb).pow(2).mean(dim=-1)
+    if "prediction_valid" in batch:
+        pred_valid = batch["prediction_valid"][:, : pred_emb.shape[1]].to(
+            device=pred_error.device,
+            dtype=pred_error.dtype,
+        )
+        output["pred_loss"] = (pred_error * pred_valid).sum() / pred_valid.sum().clamp_min(1.0)
+        output["pred_valid_fraction"] = pred_valid.mean()
+    else:
+        pred_valid = torch.ones_like(pred_error)
+        output["pred_loss"] = pred_error.mean()
+
+    valid_count = pred_valid.sum().clamp_min(1.0)
+    pred_cosine = F.cosine_similarity(pred_emb, tgt_emb, dim=-1)
+    tgt_power = tgt_emb.pow(2).mean(dim=-1)
+    output["pred_rmse"] = output["pred_loss"].sqrt()
+    output["pred_relative_rmse"] = (
+        output["pred_loss"] / ((tgt_power * pred_valid).sum() / valid_count).clamp_min(1e-12)
+    ).sqrt()
+    output["pred_cosine_similarity"] = (pred_cosine * pred_valid).sum() / valid_count
+    output["embedding_mean"] = emb.mean()
+    output["embedding_std"] = emb.std()
+    output["embedding_norm"] = emb.norm(dim=-1).mean()
+    output["prediction_norm"] = pred_emb.norm(dim=-1).mean()
+    output["target_norm"] = tgt_emb.norm(dim=-1).mean()
+    output["latent_step_norm"] = (emb[:, 1:] - emb[:, :-1]).norm(dim=-1).mean()
+    output["action_abs_mean"] = batch["action"].abs().mean()
+    output["action_std"] = batch["action"].std()
     output["sigreg_loss"]= self.sigreg(emb.transpose(0, 1))
     output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]  
 
-    losses_dict = {f"{stage}/{k}": v.detach() for k, v in output.items() if "loss" in k}
-    self.log_dict(losses_dict, on_step=True, sync_dist=True)
+    metrics_dict = {
+        f"{stage}/{k}": v.detach()
+        for k, v in output.items()
+        if isinstance(v, torch.Tensor) and v.numel() == 1
+    }
+    self.log_dict(
+        metrics_dict,
+        on_step=stage == "fit",
+        on_epoch=True,
+        sync_dist=True,
+    )
     return output
 
 @hydra.main(version_base=None, config_path="./config/train", config_name="lewm")
@@ -178,7 +249,7 @@ def run(cfg):
     
     with open_dict(cfg):
         for col in cfg.data.dataset.keys_to_load:
-            if col.startswith("pixels"):
+            if col.startswith("pixels") or col == "prediction_valid":
                 continue
             normalizer = get_column_normalizer(dataset, col, col)
             transforms.append(normalizer)
@@ -241,10 +312,15 @@ def run(cfg):
     object_dump_callback = SaveCkptCallback(
         run_name=cfg.output_model_name, cfg=cfg.model, epoch_interval=1,
     )
+    callbacks = [
+        object_dump_callback,
+        LearningRateMonitor(logging_interval="step"),
+        TrainingDiagnosticsCallback(),
+    ]
 
     trainer = pl.Trainer(
         **cfg.trainer,
-        callbacks=[object_dump_callback],
+        callbacks=callbacks,
         num_sanity_val_steps=1,
         logger=loggers or None,
         enable_checkpointing=True,

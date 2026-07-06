@@ -1,0 +1,9 @@
+dataset:
+  num_steps: ${eval:'${num_preds} + ${history_size}'}
+  frameskip: 1
+  name: isaaclab_full_angle_120k.h5
+  keys_to_load:
+    - pixels
+    - action
+  keys_to_cache:
+    - action

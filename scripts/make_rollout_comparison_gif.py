@@ -133,6 +133,8 @@ def crop_frames(frames: np.ndarray, crop: tuple[int, int, int, int] | None) -> n
 
 
 def preprocess_pixels(pixels: np.ndarray, img_size: int, device: torch.device) -> torch.Tensor:
+    pixels = np.asarray(pixels)
+    integer_pixels = np.issubdtype(pixels.dtype, np.integer)
     tensor = torch.from_numpy(pixels).float()
     if tensor.ndim != 4:
         raise ValueError(f"Expected pixels with shape (T,H,W,C) or (T,C,H,W), got {tuple(tensor.shape)}")
@@ -142,6 +144,8 @@ def preprocess_pixels(pixels: np.ndarray, img_size: int, device: torch.device) -
         tensor = tensor[:, :3]
     else:
         raise ValueError(f"Cannot infer channel axis from pixels shape {tuple(tensor.shape)}")
+    if integer_pixels or (tensor.numel() and tensor.max() > 1.5):
+        tensor = tensor / 255.0
     tensor = F.interpolate(tensor, size=(img_size, img_size), mode="bilinear", align_corners=False)
     mean = torch.tensor([0.485, 0.456, 0.406], dtype=tensor.dtype).view(1, 3, 1, 1)
     std = torch.tensor([0.229, 0.224, 0.225], dtype=tensor.dtype).view(1, 3, 1, 1)

@@ -15,10 +15,9 @@ from transformers import ViTConfig, ViTModel
 REPO_DIR = Path(__file__).resolve().parents[1]
 RL_REPO = Path("/home/hall/code/RL-Learning-BasedOn-IsaacLab/source/rl_lab_learning")
 DEFAULT_CACHE_DIR = Path("/home/hall/code/.stable-wm")
-DEFAULT_CHECKPOINT = "lewm_isaaclab_mixed_balanced/weights_epoch_100.pt"
+DEFAULT_CHECKPOINT = "lewm_isaaclab_disturbance_100k/weights_epoch_100.pt"
 DEFAULT_ACTION_STATS_H5 = [
-    Path("/home/hall/code/.stable-wm/datasets/isaaclab_random_100k.h5"),
-    Path("/home/hall/code/.stable-wm/datasets/isaaclab_policy_camera_50k.h5"),
+    Path("/home/hall/code/.stable-wm/datasets/isaaclab_policy_disturbance_100k.h5"),
 ]
 
 for repo in (REPO_DIR, RL_REPO):

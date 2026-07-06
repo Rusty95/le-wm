@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Train a frozen-LeWM latent-to-Cartpole-state probe.
+"""Train a frozen-LeWM latent-to-Cartpole observable-state probe.
 
-The probe predicts policy_obs in the fixed order:
-    [pole_pos, pole_vel, cart_pos, cart_vel]
+By default the probe predicts ``[sin(pole_pos), cos(pole_pos), cart_pos]``.
+This target is identifiable from one image and remains continuous when the
+unwrapped simulator angle crosses a multiple of 2*pi.
 """
 
 from __future__ import annotations
@@ -37,8 +38,16 @@ from scripts.lewm_isaaclab_common import (  # noqa: E402
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train latent-to-cartpole-state probe for LeWM MPC.")
-    parser.add_argument("--train-data", type=Path, default=Path("/home/hall/code/.stable-wm/datasets/isaaclab_policy_camera_50k.h5"))
-    parser.add_argument("--test-data", type=Path, default=Path("/home/hall/code/.stable-wm/datasets/isaaclab_policy_camera_test_10k.h5"))
+    parser.add_argument(
+        "--train-data",
+        type=Path,
+        default=Path("/home/hall/code/.stable-wm/datasets/isaaclab_policy_disturbance_100k.h5"),
+    )
+    parser.add_argument(
+        "--test-data",
+        type=Path,
+        default=Path("/home/hall/code/.stable-wm/datasets/isaaclab_policy_disturbance_valid_10k.h5"),
+    )
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
     parser.add_argument("--action-stats-h5", type=Path, nargs="+", default=DEFAULT_ACTION_STATS_H5)
@@ -49,10 +58,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--hidden-dim", type=int, default=256)
+    parser.add_argument(
+        "--target-mode",
+        choices=["observable", "raw-state"],
+        default="observable",
+        help="Use image-identifiable periodic targets, or the legacy raw four-state target.",
+    )
     parser.add_argument("--limit-train", type=int, default=None)
     parser.add_argument("--limit-test", type=int, default=None)
-    parser.add_argument("--out", type=Path, default=Path("/home/hall/code/.stable-wm/checkpoints/lewm_cartpole_state_probe.pt"))
-    parser.add_argument("--metrics-out", type=Path, default=Path("/home/hall/code/.stable-wm/eval/lewm_cartpole_state_probe_eval.json"))
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=Path("/home/hall/code/.stable-wm/checkpoints/lewm_disturbance_observable_probe.pt"),
+    )
+    parser.add_argument(
+        "--metrics-out",
+        type=Path,
+        default=Path("/home/hall/code/.stable-wm/eval/lewm_disturbance_observable_probe_eval.json"),
+    )
     parser.add_argument("--device", choices=["auto", "cpu", "cuda"], default="auto")
     return parser.parse_args()
 
@@ -97,7 +120,21 @@ def encode_h5(
     return torch.cat(embs, dim=0), torch.cat(targets, dim=0)
 
 
-def evaluate(probe: StateProbe, emb: torch.Tensor, target: torch.Tensor, device: torch.device) -> dict[str, float | list[float]]:
+def make_target(policy_obs: torch.Tensor, mode: str) -> tuple[torch.Tensor, list[str]]:
+    if mode == "raw-state":
+        return policy_obs, ["pole_pos", "pole_vel", "cart_pos", "cart_vel"]
+    pole_pos = policy_obs[:, 0]
+    target = torch.stack((pole_pos.sin(), pole_pos.cos(), policy_obs[:, 2]), dim=-1)
+    return target, ["pole_sin", "pole_cos", "cart_pos"]
+
+
+def evaluate(
+    probe: StateProbe,
+    emb: torch.Tensor,
+    target: torch.Tensor,
+    names: list[str],
+    device: torch.device,
+) -> dict[str, float | list[float]]:
     probe.eval()
     preds = []
     with torch.no_grad():
@@ -107,7 +144,6 @@ def evaluate(probe: StateProbe, emb: torch.Tensor, target: torch.Tensor, device:
     err = pred - target
     mse_per_dim = err.pow(2).mean(dim=0)
     mae_per_dim = err.abs().mean(dim=0)
-    names = ["pole_pos", "pole_vel", "cart_pos", "cart_vel"]
     return {
         "mse": float(err.pow(2).mean().item()),
         "mae": float(err.abs().mean().item()),
@@ -128,8 +164,14 @@ def main() -> None:
         device=device,
     )
 
-    train_emb, train_target = encode_h5(model, args.train_data, args.img_size, args.encode_batch_size, device, args.limit_train)
-    test_emb, test_target = encode_h5(model, args.test_data, args.img_size, args.encode_batch_size, device, args.limit_test)
+    train_emb, train_policy_obs = encode_h5(
+        model, args.train_data, args.img_size, args.encode_batch_size, device, args.limit_train
+    )
+    test_emb, test_policy_obs = encode_h5(
+        model, args.test_data, args.img_size, args.encode_batch_size, device, args.limit_test
+    )
+    train_target, target_names = make_target(train_policy_obs, args.target_mode)
+    test_target, _ = make_target(test_policy_obs, args.target_mode)
 
     target_mean = train_target.mean(dim=0, keepdim=True)
     target_std = train_target.std(dim=0, keepdim=True).clamp_min(1e-6)
@@ -170,8 +212,8 @@ def main() -> None:
         if (epoch + 1) % 10 == 0 or epoch == 0:
             print(f"epoch={epoch + 1:03d} train_norm_mse={train_loss:.6f}")
 
-    train_metrics = evaluate(probe, train_emb, train_target, device)
-    test_metrics = evaluate(probe, test_emb, test_target, device)
+    train_metrics = evaluate(probe, train_emb, train_target, target_names, device)
+    test_metrics = evaluate(probe, test_emb, test_target, target_names, device)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -183,9 +225,11 @@ def main() -> None:
                 "input_dim": int(train_emb.shape[-1]),
                 "hidden_dim": int(args.hidden_dim),
                 "output_dim": int(train_target.shape[-1]),
+                "target_mode": args.target_mode,
+                "target_names": target_names,
                 "checkpoint": args.checkpoint,
                 "img_size": args.img_size,
-                "state_order": ["pole_pos", "pole_vel", "cart_pos", "cart_vel"],
+                "state_order": target_names,
             },
         },
         args.out,

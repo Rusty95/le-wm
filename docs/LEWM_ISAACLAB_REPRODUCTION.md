@@ -192,6 +192,64 @@ python /home/hall/code/le-wm/scripts/convert_isaaclab_npz_to_h5.py \
   --keys pixels action reward done policy_obs
 ```
 
+### 2.4 连续随机扰动数据 100k（当前推荐）
+
+当前方案让 swing-up PPO 持续运行。杆和小车连续稳定 60 帧后，
+向杆施加一次随机方向、随机强度的角速度脉冲，幅值范围为
+`2.4-6.0 rad/s`。恢复稳定并经过 cooldown 后再次扰动。采集场景固定
+使用黑色地面、青色小车和黄色杆。
+
+采集过程不会在输出文件边界 reset。每个 NPZ 最多保存 600 帧，
+仅作为安全分段；真实环境 `done` 会立即结束当前分段，禁止跨 reset
+拼接轨迹。
+
+查看完整配置和命令：
+
+```bash
+cd /home/hall/code
+le-wm/scripts/prepare_isaaclab_disturbance_100k_dataset.sh plan
+```
+
+在 IsaacLab 环境采集：
+
+```bash
+source /home/hall/miniconda3/etc/profile.d/conda.sh
+conda activate env_isaaclab
+export LD_PRELOAD="$LD_PRELOAD:/lib/aarch64-linux-gnu/libgomp.so.1"
+
+cd /home/hall/code
+le-wm/scripts/prepare_isaaclab_disturbance_100k_dataset.sh collect
+```
+
+在 LeWM 环境转换、检查并生成可视化：
+
+```bash
+source /home/hall/code/activate_lewm.sh
+cd /home/hall/code
+le-wm/scripts/prepare_isaaclab_disturbance_100k_dataset.sh all
+```
+
+HDF5 额外保存：
+
+```text
+disturbance       本次 transition 注入的杆角速度脉冲，0 表示无扰动
+stable            transition 开始前是否处于稳定区域
+recovery_phase    是否正在从上一次扰动中恢复
+prediction_valid  是否计算该 transition 的 LeWM 预测损失
+```
+
+外部脉冲不是 policy action 的一部分，因此注入脉冲的 transition 设置
+`prediction_valid=False`。LeWM 会屏蔽这一项不可预测的损失，但仍学习
+后续完整的倾倒、救杆和恢复过程。
+
+训练：
+
+```bash
+source /home/hall/code/activate_lewm.sh
+cd /home/hall/code/le-wm
+python train.py data=isaaclab_policy_disturbance_100k
+```
+
 ## 3. LeWM 混合训练
 
 最终采用 balanced interleave，而不是简单把两个数据集拼接：

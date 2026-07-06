@@ -28,12 +28,22 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="LeWM-only MPC controller for IsaacLab Cartpole.")
     parser.add_argument("--task", type=str, default="Isaac-Cartpole-RGB-Camera-Direct-v0")
     parser.add_argument("--checkpoint", default=DEFAULT_CHECKPOINT)
-    parser.add_argument("--probe", type=Path, default=Path("/home/hall/code/.stable-wm/checkpoints/lewm_cartpole_state_probe.pt"))
+    parser.add_argument(
+        "--probe",
+        type=Path,
+        default=Path("/home/hall/code/.stable-wm/checkpoints/lewm_disturbance_observable_probe.pt"),
+    )
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE_DIR)
     parser.add_argument("--action-stats-h5", type=Path, nargs="+", default=DEFAULT_ACTION_STATS_H5)
     parser.add_argument("--max-stats-rows-per-file", type=int, default=50000)
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--episode-len", type=int, default=300)
+    parser.add_argument(
+        "--episode-length-s",
+        type=float,
+        default=None,
+        help="Override the IsaacLab task time limit; must cover --episode-len at the environment step rate.",
+    )
     parser.add_argument("--horizon", type=int, default=12)
     parser.add_argument("--num-candidates", type=int, default=512)
     parser.add_argument("--elite-frac", type=float, default=0.1)
@@ -44,7 +54,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--action-high", type=float, default=1.0)
     parser.add_argument("--img-size", type=int, default=224)
     parser.add_argument("--pixel-key", type=str, default="policy")
+    parser.add_argument("--use-render", action="store_true", help="Use env.render() instead of an observation pixel key.")
+    parser.add_argument("--high-contrast-scene", action="store_true", help="Use the visual domain from training.")
     parser.add_argument("--num-envs", "--num_envs", dest="num_envs", type=int, default=1)
+    parser.add_argument("--seed", type=int, default=None, help="Seed IsaacLab, NumPy, and Torch for reproducible runs.")
     parser.add_argument("--disable_fabric", action="store_true", default=False)
     parser.add_argument("--save-gif", action="store_true")
     parser.add_argument("--gif-out", type=Path, default=Path("/home/hall/code/.stable-wm/visualizations/lewm_mpc_cartpole.gif"))
@@ -54,8 +67,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ground-size", type=float, default=10.0)
     parser.add_argument("--force-rescue-candidates", action="store_true", help="Always evaluate hand-coded strong rescue action sequences.")
     parser.add_argument("--save-step-diagnostics", action="store_true", help="Store per-step true state, selected action, and MPC diagnostics in JSON.")
-    parser.add_argument("--objective", choices=["state-probe", "latent-target"], default="state-probe")
-    parser.add_argument("--target-h5", type=Path, default=Path("/home/hall/code/.stable-wm/datasets/isaaclab_policy_camera_50k.h5"))
+    parser.add_argument("--objective", choices=["state-probe", "latent-target"], default="latent-target")
+    parser.add_argument(
+        "--target-h5",
+        type=Path,
+        default=Path("/home/hall/code/.stable-wm/datasets/isaaclab_policy_disturbance_100k.h5"),
+    )
     parser.add_argument("--target-max-frames", type=int, default=512)
     parser.add_argument("--target-pole-threshold", type=float, default=0.08)
     parser.add_argument("--target-cart-threshold", type=float, default=0.25)
@@ -97,6 +114,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prior-cart-kp", type=float, default=0.25)
     parser.add_argument("--prior-cart-kd", type=float, default=0.08)
     parser.add_argument(
+        "--center-prior-weight",
+        type=float,
+        default=0.0,
+        help="Weight for a cart-centering prior that is enabled only while the pole is safe.",
+    )
+    parser.add_argument("--center-cart-kp", type=float, default=0.35)
+    parser.add_argument("--center-cart-kd", type=float, default=0.08)
+    parser.add_argument("--center-max-lean", type=float, default=0.12)
+    parser.add_argument("--center-safe-angle", type=float, default=0.20)
+    parser.add_argument("--center-safe-pole-vel", type=float, default=1.50)
+    parser.add_argument("--center-edge-threshold", type=float, default=1.0)
+    parser.add_argument("--center-edge-full-activation", type=float, default=1.8)
+    parser.add_argument("--center-edge-max-lean", type=float, default=0.18)
+    parser.add_argument("--center-edge-weight-boost", type=float, default=0.0)
+    parser.add_argument("--center-edge-velocity-lookahead", type=float, default=0.25)
+    parser.add_argument("--staged-control", action="store_true")
+    parser.add_argument("--balance-center-scale", type=float, default=0.2)
+    parser.add_argument("--recenter-enter-pos", type=float, default=0.8)
+    parser.add_argument("--recenter-enter-velocity-lookahead", type=float, default=0.15)
+    parser.add_argument("--recenter-exit-pos", type=float, default=0.35)
+    parser.add_argument("--recenter-exit-velocity", type=float, default=0.35)
+    parser.add_argument("--rescue-enter-angle", type=float, default=0.25)
+    parser.add_argument("--rescue-enter-pole-vel", type=float, default=2.0)
+    parser.add_argument("--rescue-exit-angle", type=float, default=0.12)
+    parser.add_argument("--rescue-exit-pole-vel", type=float, default=0.8)
+    parser.add_argument("--rescue-exit-stable-steps", type=int, default=20)
+    parser.add_argument(
         "--edge-rescue-weight",
         type=float,
         default=0.0,
@@ -122,9 +166,37 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Activation value at which edge rescue fully gates the action prior.",
     )
+    parser.add_argument(
+        "--initial-pole-angle-range",
+        type=float,
+        nargs=2,
+        default=(-0.1, 0.1),
+        metavar=("MIN", "MAX"),
+        help="Reset pole angle range in radians.",
+    )
+    parser.add_argument("--disturbance-start-step", type=int, default=-1, help="First disturbance step; negative disables it.")
+    parser.add_argument("--disturbance-interval", type=int, default=100)
+    parser.add_argument("--disturbance-count", type=int, default=2)
+    parser.add_argument("--disturbance-min", type=float, default=2.4)
+    parser.add_argument("--disturbance-max", type=float, default=6.0)
+    parser.add_argument(
+        "--disturbance-require-stable",
+        action="store_true",
+        help="Only disturb after sustained stability, and wait for recovery before the next disturbance.",
+    )
+    parser.add_argument(
+        "--disturbance-first-immediate",
+        action="store_true",
+        help="Apply the first disturbance at start-step; later disturbances still require recovery.",
+    )
+    parser.add_argument("--disturbance-stable-steps", type=int, default=60)
+    parser.add_argument("--disturbance-angle-threshold", type=float, default=0.15)
+    parser.add_argument("--disturbance-pole-vel-threshold", type=float, default=0.8)
+    parser.add_argument("--disturbance-cart-threshold", type=float, default=0.8)
+    parser.add_argument("--disturbance-cart-vel-threshold", type=float, default=0.5)
     AppLauncher.add_app_launcher_args(parser)
     args = parser.parse_args()
-    if "Camera" in args.task:
+    if args.use_render or "Camera" in args.task:
         args.enable_cameras = True
     return args
 
@@ -136,11 +208,13 @@ simulation_app = app_launcher.app
 import gymnasium as gym  # noqa: E402
 import h5py  # noqa: E402
 import imageio.v2 as imageio  # noqa: E402
+import isaaclab.sim as sim_utils  # noqa: E402
 import isaaclab_tasks  # noqa: F401,E402
 import numpy as np  # noqa: E402
 import omni.usd  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
+import rl_lab_learning.tasks  # noqa: F401,E402
 from omni.physx.scripts import physicsUtils  # noqa: E402
 from pxr import Gf  # noqa: E402
 
@@ -179,6 +253,44 @@ def add_visual_ground_plane(path: str = "/World/LeWMGroundPlane") -> None:
     )
 
 
+def apply_high_contrast_scene() -> None:
+    stage = omni.usd.get_context().get_stage()
+    materials = {
+        "ground": (
+            "/World/Looks/LeWMGroundBlack",
+            sim_utils.PreviewSurfaceCfg(diffuse_color=(0.01, 0.01, 0.01), roughness=0.8),
+        ),
+        "cart": (
+            "/World/Looks/LeWMCartCyan",
+            sim_utils.PreviewSurfaceCfg(diffuse_color=(0.0, 0.75, 1.0), roughness=0.35),
+        ),
+        "pole": (
+            "/World/Looks/LeWMPoleYellow",
+            sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.9, 0.0), roughness=0.35),
+        ),
+    }
+    for material_path, material_cfg in materials.values():
+        material_cfg.func(material_path, material_cfg)
+    if stage.GetPrimAtPath("/World/ground").IsValid():
+        sim_utils.bind_visual_material("/World/ground", materials["ground"][0], stage=stage)
+    for prim in stage.Traverse():
+        path = str(prim.GetPath())
+        name = prim.GetName()
+        if "/Robot/" in path and name in ("cart", "pole"):
+            sim_utils.bind_visual_material(path, materials[name][0], stage=stage)
+
+
+def read_pixels(env, obs) -> np.ndarray:
+    if args_cli.use_render:
+        pixels = np.asarray(env.render())
+        if pixels.ndim == 4:
+            pixels = pixels[0]
+        if pixels.shape[-1] == 4:
+            pixels = pixels[..., :3]
+        return pixels
+    return get_pixels(obs, args_cli.pixel_key, args_cli.num_envs)
+
+
 def make_rescue_candidates(horizon: int, action_dim: int, device: torch.device) -> torch.Tensor:
     """Return a small bank of deliberately aggressive action sequences."""
     high = float(args_cli.action_high)
@@ -212,6 +324,20 @@ def visualize_frame(frame: np.ndarray) -> np.ndarray:
     lo = float(frame[finite].min())
     hi = float(frame[finite].max())
     return np.clip((frame - lo) / max(hi - lo, 1e-6) * 255.0, 0, 255).astype(np.uint8)[..., :3]
+
+
+def apply_pole_velocity_disturbance(env: Any, velocity_delta: float) -> None:
+    unwrapped = env.unwrapped
+    cartpole = getattr(unwrapped, "_cartpole", None) or getattr(unwrapped, "cartpole", None)
+    pole_idx = getattr(unwrapped, "_pole_dof_idx", None)
+    if cartpole is None or pole_idx is None:
+        raise AttributeError("Could not find Cartpole articulation or pole joint index.")
+
+    joint_pos = cartpole.data.joint_pos.clone()
+    joint_vel = cartpole.data.joint_vel.clone()
+    joint_vel[:, pole_idx[0]] += velocity_delta
+    env_ids = torch.arange(joint_pos.shape[0], device=joint_pos.device)
+    cartpole.write_joint_state_to_sim(joint_pos, joint_vel, None, env_ids)
 
 
 def predict_candidate_states(
@@ -273,16 +399,34 @@ def predict_candidate_embeddings(
 
 
 def candidate_cost(states: torch.Tensor, candidates: torch.Tensor, last_action: torch.Tensor) -> torch.Tensor:
-    pole_pos = states[..., 0]
-    pole_vel = states[..., 1]
-    cart_pos = states[..., 2]
-    cart_vel = states[..., 3]
-    cost = (
-        8.0 * pole_pos.square()
-        + 0.5 * pole_vel.square()
-        + 1.0 * cart_pos.square()
-        + 0.05 * cart_vel.square()
-    ).sum(dim=1)
+    if states.shape[-1] == 3:
+        pole_sin = states[..., 0]
+        pole_cos = states[..., 1]
+        cart_pos = states[..., 2]
+        pole_angle = torch.atan2(pole_sin, pole_cos)
+        pole_delta = torch.atan2(
+            torch.sin(pole_angle[:, 1:] - pole_angle[:, :-1]),
+            torch.cos(pole_angle[:, 1:] - pole_angle[:, :-1]),
+        )
+        cart_delta = cart_pos[:, 1:] - cart_pos[:, :-1]
+        cost = (
+            10.0 * pole_sin.square()
+            + 10.0 * (1.0 - pole_cos).square()
+            + 2.0 * cart_pos.square()
+        ).sum(dim=1)
+        cost = cost + 1.0 * pole_delta.square().sum(dim=1)
+        cost = cost + 0.1 * cart_delta.square().sum(dim=1)
+    else:
+        pole_pos = states[..., 0]
+        pole_vel = states[..., 1]
+        cart_pos = states[..., 2]
+        cart_vel = states[..., 3]
+        cost = (
+            8.0 * pole_pos.square()
+            + 0.5 * pole_vel.square()
+            + 1.0 * cart_pos.square()
+            + 0.05 * cart_vel.square()
+        ).sum(dim=1)
     cost = cost + 0.01 * candidates.square().sum(dim=(1, 2))
     prev_action = last_action.reshape(1, 1, -1).expand(candidates.shape[0], 1, -1)
     prev = torch.cat([prev_action, candidates[:, :-1]], dim=1)
@@ -305,7 +449,8 @@ def add_direction_bias(
     if args_cli.direction_bias_weight <= 0.0 or current_state is None:
         return cost, None
     state = current_state.detach().float().reshape(-1).to(candidates.device)
-    pole_pos = state[0]
+    pole_pos_raw = state[0]
+    pole_pos = torch.atan2(torch.sin(pole_pos_raw), torch.cos(pole_pos_raw))
     pole_vel = state[1]
     cart_pos = state[2]
     cart_vel = state[3]
@@ -347,6 +492,7 @@ def add_direction_bias(
         "direction": float(direction.cpu()),
         "weight": args_cli.direction_bias_weight,
         "pole_pos": float(pole_pos.cpu()),
+        "pole_pos_raw": float(pole_pos_raw.cpu()),
         "pole_vel": float(pole_vel.cpu()),
         "cart_pos": float(cart_pos.cpu()),
         "cart_vel": float(cart_vel.cpu()),
@@ -364,7 +510,8 @@ def add_action_prior(
     if args_cli.action_prior_weight <= 0.0 or current_state is None:
         return cost, None
     state = current_state.detach().float().reshape(-1).to(candidates.device)
-    pole_pos = state[0]
+    pole_pos_raw = state[0]
+    pole_pos = torch.atan2(torch.sin(pole_pos_raw), torch.cos(pole_pos_raw))
     pole_vel = state[1]
     cart_pos = state[2]
     cart_vel = state[3]
@@ -396,6 +543,7 @@ def add_action_prior(
         "pole_score": float(pole_score.cpu()),
         "cart_score": float(cart_score.cpu()),
         "pole_pos": float(pole_pos.cpu()),
+        "pole_pos_raw": float(pole_pos_raw.cpu()),
         "pole_vel": float(pole_vel.cpu()),
         "cart_pos": float(cart_pos.cpu()),
         "cart_vel": float(cart_vel.cpu()),
@@ -407,12 +555,77 @@ def add_action_prior(
     return cost + prior_cost, meta
 
 
+def add_center_prior(
+    cost: torch.Tensor,
+    candidates: torch.Tensor,
+    current_state: torch.Tensor | None,
+    center_scale: float = 1.0,
+) -> tuple[torch.Tensor, dict[str, Any] | None]:
+    if args_cli.center_prior_weight <= 0.0 or center_scale <= 0.0 or current_state is None:
+        return cost, None
+    state = current_state.detach().float().reshape(-1).to(candidates.device)
+    pole_pos = torch.atan2(torch.sin(state[0]), torch.cos(state[0]))
+    pole_vel = state[1]
+    cart_pos = state[2]
+    cart_vel = state[3]
+
+    angle_gate = (
+        1.0 - pole_pos.abs() / max(args_cli.center_safe_angle, 1e-6)
+    ).clamp(0.0, 1.0)
+    velocity_gate = (
+        1.0 - pole_vel.abs() / max(args_cli.center_safe_pole_vel, 1e-6)
+    ).clamp(0.0, 1.0)
+    safety_gate = angle_gate * velocity_gate
+    target_pole_pos = (
+        args_cli.center_cart_kp * cart_pos + args_cli.center_cart_kd * cart_vel
+    )
+    outward_velocity = torch.relu(torch.sign(cart_pos) * cart_vel)
+    edge_measure = cart_pos.abs() + args_cli.center_edge_velocity_lookahead * outward_velocity
+    edge_span = max(args_cli.center_edge_full_activation - args_cli.center_edge_threshold, 1e-6)
+    edge_activation = ((edge_measure - args_cli.center_edge_threshold) / edge_span).clamp(0.0, 1.0)
+    lean_limit = args_cli.center_max_lean + edge_activation * (
+        args_cli.center_edge_max_lean - args_cli.center_max_lean
+    )
+    target_pole_pos = target_pole_pos.clamp(-lean_limit, lean_limit)
+    pole_error = pole_pos - target_pole_pos
+    target_action = (
+        -args_cli.prior_pole_kp * pole_error - args_cli.prior_pole_kd * pole_vel
+    ).clamp(args_cli.action_low, args_cli.action_high)
+    center_weight = center_scale * (
+        args_cli.center_prior_weight + args_cli.center_edge_weight_boost * edge_activation
+    )
+    effective_weight = center_weight * safety_gate
+    first_action = candidates[:, 0, 0]
+    center_cost = effective_weight * (first_action - target_action).square()
+    meta = {
+        "active": bool(safety_gate > 0.0),
+        "safety_gate": float(safety_gate.cpu()),
+        "angle_gate": float(angle_gate.cpu()),
+        "velocity_gate": float(velocity_gate.cpu()),
+        "effective_weight": float(effective_weight.cpu()),
+        "center_weight": float(center_weight.cpu()),
+        "center_scale": center_scale,
+        "target_action": float(target_action.cpu()),
+        "target_pole_pos": float(target_pole_pos.cpu()),
+        "pole_error": float(pole_error.cpu()),
+        "edge_measure": float(edge_measure.cpu()),
+        "edge_activation": float(edge_activation.cpu()),
+        "lean_limit": float(lean_limit.cpu()),
+        "pole_pos": float(pole_pos.cpu()),
+        "pole_vel": float(pole_vel.cpu()),
+        "cart_pos": float(cart_pos.cpu()),
+        "cart_vel": float(cart_vel.cpu()),
+    }
+    return cost + center_cost, meta
+
+
 def add_edge_rescue(
     cost: torch.Tensor,
     candidates: torch.Tensor,
     current_state: torch.Tensor | None,
+    edge_scale: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, Any] | None]:
-    if args_cli.edge_rescue_weight <= 0.0 or current_state is None:
+    if args_cli.edge_rescue_weight <= 0.0 or edge_scale <= 0.0 or current_state is None:
         return cost, None
     state = current_state.detach().float().reshape(-1).to(candidates.device)
     cart_pos = state[2]
@@ -440,7 +653,7 @@ def add_edge_rescue(
     first_action = candidates[:, 0, 0]
     outward = torch.relu(torch.sign(cart_pos) * first_action).square()
     return_error = (first_action - target_action).square()
-    rescue_cost = args_cli.edge_rescue_weight * activation * (outward + 0.5 * return_error)
+    rescue_cost = edge_scale * args_cli.edge_rescue_weight * activation * (outward + 0.5 * return_error)
     meta = {
         "active": True,
         "activation": float(activation.cpu()),
@@ -450,6 +663,7 @@ def add_edge_rescue(
         "cart_vel": float(cart_vel.cpu()),
         "target_action": float(target_action.cpu()),
         "weight": args_cli.edge_rescue_weight,
+        "edge_scale": edge_scale,
         "threshold": args_cli.edge_rescue_threshold,
         "velocity_threshold": args_cli.edge_rescue_velocity_threshold,
         "return_action": args_cli.edge_rescue_return_action,
@@ -530,6 +744,8 @@ def choose_action(
     device: torch.device,
     target_emb: torch.Tensor | None = None,
     current_state: torch.Tensor | None = None,
+    center_scale: float = 1.0,
+    edge_scale: float = 1.0,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     horizon = args_cli.horizon
     num_candidates = args_cli.num_candidates
@@ -545,6 +761,7 @@ def choose_action(
     best_rescue_action = None
     best_direction_meta = None
     best_action_prior_meta = None
+    best_center_prior_meta = None
     best_edge_rescue_meta = None
     for _ in range(args_cli.cem_iters):
         samples = mean.unsqueeze(0) + std.unsqueeze(0) * torch.randn(num_candidates, horizon, action_dim, device=device)
@@ -587,7 +804,8 @@ def choose_action(
             costs = candidate_cost(states, samples, last_action.to(device))
         costs, direction_meta = add_direction_bias(costs, samples, current_state)
         costs, action_prior_meta = add_action_prior(costs, samples, current_state)
-        costs, edge_rescue_meta = add_edge_rescue(costs, samples, current_state)
+        costs, center_prior_meta = add_center_prior(costs, samples, current_state, center_scale)
+        costs, edge_rescue_meta = add_edge_rescue(costs, samples, current_state, edge_scale)
         if rescue_count:
             rescue_costs = costs[-rescue_count:]
             rescue_best = int(rescue_costs.argmin().item())
@@ -604,6 +822,7 @@ def choose_action(
             best_action = samples[current_best, 0].detach()
             best_direction_meta = direction_meta
             best_action_prior_meta = action_prior_meta
+            best_center_prior_meta = center_prior_meta
             best_edge_rescue_meta = edge_rescue_meta
             if states is not None:
                 best_state = states[current_best, 0].detach()
@@ -615,6 +834,7 @@ def choose_action(
         "best_rescue_action": best_rescue_action.detach().cpu().tolist() if best_rescue_action is not None else None,
         "direction_bias": best_direction_meta,
         "action_prior": best_action_prior_meta,
+        "center_prior": best_center_prior_meta,
         "edge_rescue": best_edge_rescue_meta,
     }
     return best_action.clamp(args_cli.action_low, args_cli.action_high), info
@@ -623,6 +843,28 @@ def choose_action(
 def main() -> None:
     if args_cli.num_envs != 1:
         raise ValueError("LeWM MPC v1 requires --num-envs 1.")
+    if args_cli.seed is not None:
+        np.random.seed(args_cli.seed)
+        torch.manual_seed(args_cli.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args_cli.seed)
+    if args_cli.disturbance_interval <= 0:
+        raise ValueError("--disturbance-interval must be positive.")
+    if args_cli.disturbance_count < 0:
+        raise ValueError("--disturbance-count must be non-negative.")
+    if args_cli.disturbance_stable_steps <= 0:
+        raise ValueError("--disturbance-stable-steps must be positive.")
+    if args_cli.disturbance_pole_vel_threshold <= 0.0 or args_cli.disturbance_cart_vel_threshold <= 0.0:
+        raise ValueError("Disturbance velocity thresholds must be positive.")
+    if not 0.0 < args_cli.disturbance_min <= args_cli.disturbance_max:
+        raise ValueError("Require 0 < --disturbance-min <= --disturbance-max.")
+    if args_cli.center_edge_full_activation <= args_cli.center_edge_threshold:
+        raise ValueError("--center-edge-full-activation must exceed --center-edge-threshold.")
+    if args_cli.center_edge_max_lean <= 0.0:
+        raise ValueError("--center-edge-max-lean must be positive.")
+    if args_cli.rescue_exit_stable_steps <= 0:
+        raise ValueError("--rescue-exit-stable-steps must be positive.")
+    disturbance_rng = np.random.default_rng(args_cli.seed)
 
     env_cfg = parse_env_cfg(
         args_cli.task,
@@ -630,9 +872,26 @@ def main() -> None:
         num_envs=args_cli.num_envs,
         use_fabric=not args_cli.disable_fabric,
     )
-    env = gym.make(args_cli.task, cfg=env_cfg)
+    if hasattr(env_cfg, "scene") and hasattr(env_cfg.scene, "clone_in_fabric"):
+        # MPC deployment uses one environment. Keep Fabric pose propagation for
+        # the live viewport, but avoid the unsupported single-env clone path.
+        env_cfg.scene.clone_in_fabric = False
+    if args_cli.seed is not None:
+        env_cfg.seed = args_cli.seed
+    if args_cli.episode_length_s is not None:
+        if args_cli.episode_length_s <= 0.0:
+            raise ValueError("--episode-length-s must be positive.")
+        env_cfg.episode_length_s = args_cli.episode_length_s
+    angle_min, angle_max = args_cli.initial_pole_angle_range
+    if angle_min > angle_max:
+        raise ValueError("--initial-pole-angle-range requires MIN <= MAX.")
+    if hasattr(env_cfg, "initial_pole_angle_range_rad"):
+        env_cfg.initial_pole_angle_range_rad = [angle_min, angle_max]
+    env = gym.make(args_cli.task, cfg=env_cfg, render_mode="rgb_array" if args_cli.use_render else None)
     if args_cli.add_ground_plane:
         add_visual_ground_plane()
+    if args_cli.high_contrast_scene:
+        apply_high_contrast_scene()
     device = resolve_device(args_cli.device)
     action_mean, action_std = load_action_stats(args_cli.action_stats_h5, args_cli.max_stats_rows_per_file)
     action_mean = action_mean.to(device)
@@ -668,7 +927,7 @@ def main() -> None:
         for ep_idx in range(args_cli.episodes):
             reset_out = env.reset()
             obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
-            first_pixel = get_pixels(obs, args_cli.pixel_key, args_cli.num_envs)
+            first_pixel = read_pixels(env, obs)
             pixel_history: deque[np.ndarray] = deque([first_pixel.copy() for _ in range(history_size)], maxlen=history_size)
             zero_action = np.zeros((action_dim,), dtype=np.float32)
             action_history: deque[np.ndarray] = deque([zero_action.copy() for _ in range(history_size)], maxlen=history_size)
@@ -679,11 +938,147 @@ def main() -> None:
             true_states = []
             mpc_costs = []
             step_diagnostics = []
+            disturbance_events = []
+            disturbances_applied = 0
+            stable_steps = 0
+            awaiting_recovery = False
+            last_disturbance_step = -args_cli.disturbance_interval
+            control_mode = "balance"
+            rescue_stable_steps = 0
+            control_mode_events = [{"step": 0, "from": None, "to": control_mode, "reason": "episode_start"}]
             survival_steps = 0
             for step in range(args_cli.episode_len):
+                state_before = get_cartpole_state(env)
+                wrapped_angle = torch.atan2(torch.sin(state_before[:, 0]), torch.cos(state_before[:, 0]))
+                is_stable = bool(
+                    torch.all(wrapped_angle.abs() < args_cli.disturbance_angle_threshold)
+                    and torch.all(state_before[:, 1].abs() < args_cli.disturbance_pole_vel_threshold)
+                    and torch.all(state_before[:, 2].abs() < args_cli.disturbance_cart_threshold)
+                    and torch.all(state_before[:, 3].abs() < args_cli.disturbance_cart_vel_threshold)
+                )
+                stable_steps = stable_steps + 1 if is_stable else 0
+                if (
+                    args_cli.disturbance_require_stable
+                    and awaiting_recovery
+                    and stable_steps >= args_cli.disturbance_stable_steps
+                ):
+                    recovery_steps = step - last_disturbance_step
+                    disturbance_events[-1]["recovery_step"] = step
+                    disturbance_events[-1]["recovery_steps"] = recovery_steps
+                    awaiting_recovery = False
+                    print(f"[DISTURBANCE] episode={ep_idx} recovered after {recovery_steps} steps")
+
+                disturbance = 0.0
+                if args_cli.disturbance_require_stable:
+                    first_immediate_due = (
+                        args_cli.disturbance_first_immediate
+                        and disturbances_applied == 0
+                        and disturbances_applied < args_cli.disturbance_count
+                        and args_cli.disturbance_start_step >= 0
+                        and step >= args_cli.disturbance_start_step
+                    )
+                    recovered_disturbance_due = (
+                        args_cli.disturbance_start_step >= 0
+                        and disturbances_applied < args_cli.disturbance_count
+                        and step >= args_cli.disturbance_start_step
+                        and not awaiting_recovery
+                        and stable_steps >= args_cli.disturbance_stable_steps
+                        and step - last_disturbance_step >= args_cli.disturbance_interval
+                        and (not args_cli.staged_control or control_mode == "balance")
+                    )
+                    disturbance_due = first_immediate_due or recovered_disturbance_due
+                else:
+                    disturbance_due = (
+                        args_cli.disturbance_start_step >= 0
+                        and disturbances_applied < args_cli.disturbance_count
+                        and step >= args_cli.disturbance_start_step
+                        and (step - args_cli.disturbance_start_step) % args_cli.disturbance_interval == 0
+                    )
+                if disturbance_due:
+                    magnitude = float(disturbance_rng.uniform(args_cli.disturbance_min, args_cli.disturbance_max))
+                    disturbance = magnitude if bool(disturbance_rng.integers(0, 2)) else -magnitude
+                    apply_pole_velocity_disturbance(env, disturbance)
+                    disturbances_applied += 1
+                    last_disturbance_step = step
+                    awaiting_recovery = args_cli.disturbance_require_stable
+                    stable_steps = 0
+                    disturbance_events.append(
+                        {
+                            "step": step,
+                            "pole_velocity_delta": disturbance,
+                            "recovery_step": None,
+                            "recovery_steps": None,
+                        }
+                    )
+                    print(
+                        f"[DISTURBANCE] episode={ep_idx} step={step} "
+                        f"pole_velocity_delta={disturbance:+.3f} rad/s"
+                    )
                 true_state = get_cartpole_state(env)
                 true_state_np = first_env(true_state, args_cli.num_envs).astype(np.float32)
                 true_states.append(true_state_np)
+                if args_cli.staged_control:
+                    pole_pos = float(np.arctan2(np.sin(true_state_np[0]), np.cos(true_state_np[0])))
+                    pole_vel = float(true_state_np[1])
+                    cart_pos = float(true_state_np[2])
+                    cart_vel = float(true_state_np[3])
+                    outward_velocity = max(np.sign(cart_pos) * cart_vel, 0.0)
+                    recenter_measure = abs(cart_pos) + args_cli.recenter_enter_velocity_lookahead * outward_velocity
+                    previous_mode = control_mode
+                    transition_reason = None
+
+                    if (
+                        abs(pole_pos) >= args_cli.rescue_enter_angle
+                        or abs(pole_vel) >= args_cli.rescue_enter_pole_vel
+                    ):
+                        control_mode = "rescue"
+                        rescue_stable_steps = 0
+                        transition_reason = "pole_unsafe"
+                    elif control_mode == "rescue":
+                        rescue_safe = (
+                            abs(pole_pos) <= args_cli.rescue_exit_angle
+                            and abs(pole_vel) <= args_cli.rescue_exit_pole_vel
+                        )
+                        rescue_stable_steps = rescue_stable_steps + 1 if rescue_safe else 0
+                        if rescue_stable_steps >= args_cli.rescue_exit_stable_steps:
+                            control_mode = (
+                                "recenter" if recenter_measure >= args_cli.recenter_enter_pos else "balance"
+                            )
+                            transition_reason = "pole_recovered"
+                    elif control_mode == "recenter":
+                        if (
+                            abs(cart_pos) <= args_cli.recenter_exit_pos
+                            and abs(cart_vel) <= args_cli.recenter_exit_velocity
+                        ):
+                            control_mode = "balance"
+                            transition_reason = "cart_centered"
+                    elif recenter_measure >= args_cli.recenter_enter_pos:
+                        control_mode = "recenter"
+                        transition_reason = "cart_drifting"
+
+                    if control_mode != previous_mode:
+                        control_mode_events.append(
+                            {
+                                "step": step,
+                                "from": previous_mode,
+                                "to": control_mode,
+                                "reason": transition_reason,
+                                "pole_pos": pole_pos,
+                                "pole_vel": pole_vel,
+                                "cart_pos": cart_pos,
+                                "cart_vel": cart_vel,
+                            }
+                        )
+
+                if control_mode == "rescue":
+                    center_scale = 0.0
+                    edge_scale = 0.0
+                elif control_mode == "recenter":
+                    center_scale = 1.0
+                    edge_scale = 1.0
+                else:
+                    center_scale = args_cli.balance_center_scale if args_cli.staged_control else 1.0
+                    edge_scale = 1.0
                 action, info = choose_action(
                     model=model,
                     probe=probe,
@@ -698,12 +1093,14 @@ def main() -> None:
                     device=device,
                     target_emb=target_emb,
                     current_state=true_state,
+                    center_scale=center_scale,
+                    edge_scale=edge_scale,
                 )
                 action_env = action.reshape(1, -1).to(env.unwrapped.device)
                 obs, reward, terminated, truncated, _ = env.step(action_env)
                 done = torch.logical_or(terminated, truncated)
 
-                pixel = get_pixels(obs, args_cli.pixel_key, args_cli.num_envs)
+                pixel = read_pixels(env, obs)
                 pixel_history.append(pixel)
                 action_np = action.detach().cpu().numpy().astype(np.float32)
                 action_history.append(action_np)
@@ -717,6 +1114,10 @@ def main() -> None:
                     step_diagnostics.append(
                         {
                             "step": step,
+                            "disturbance": disturbance,
+                            "control_mode": control_mode,
+                            "center_scale": center_scale,
+                            "edge_scale": edge_scale,
                             "true_state": true_state_np.tolist(),
                             "action": action_np.tolist(),
                             "reward": reward_float,
@@ -727,6 +1128,7 @@ def main() -> None:
                             "best_rescue_action": info["best_rescue_action"],
                             "direction_bias": info["direction_bias"],
                             "action_prior": info["action_prior"],
+                            "center_prior": info["center_prior"],
                             "edge_rescue": info["edge_rescue"],
                         }
                     )
@@ -742,8 +1144,18 @@ def main() -> None:
                 "reward_sum": float(np.sum(rewards)),
                 "survival_steps": int(survival_steps),
                 "done_count": int(np.sum(dones)),
-                "mean_abs_pole_angle": float(np.abs(states[:, 0]).mean()) if len(states) else None,
-                "max_abs_pole_angle": float(np.abs(states[:, 0]).max()) if len(states) else None,
+                "disturbances": disturbance_events,
+                "control_mode_events": control_mode_events,
+                "mean_abs_pole_angle": (
+                    float(np.abs(np.arctan2(np.sin(states[:, 0]), np.cos(states[:, 0]))).mean())
+                    if len(states)
+                    else None
+                ),
+                "max_abs_pole_angle": (
+                    float(np.abs(np.arctan2(np.sin(states[:, 0]), np.cos(states[:, 0]))).max())
+                    if len(states)
+                    else None
+                ),
                 "mean_abs_cart_pos": float(np.abs(states[:, 2]).mean()) if len(states) else None,
                 "mean_mpc_cost": float(np.mean(mpc_costs)) if mpc_costs else None,
             }
@@ -757,6 +1169,7 @@ def main() -> None:
     result = {
         "mode": "lewm_mpc_cartpole",
         "task": args_cli.task,
+        "seed": args_cli.seed,
         "checkpoint": args_cli.checkpoint,
         "probe": str(args_cli.probe) if probe is not None else None,
         "objective": args_cli.objective,
@@ -770,6 +1183,7 @@ def main() -> None:
             "terminated_episodes": int(np.sum([ep["done_count"] > 0 for ep in episodes])),
         },
         "mpc": {
+            "episode_length_s": args_cli.episode_length_s,
             "horizon": args_cli.horizon,
             "num_candidates": args_cli.num_candidates,
             "elite_frac": args_cli.elite_frac,
@@ -791,12 +1205,46 @@ def main() -> None:
             "prior_pole_kd": args_cli.prior_pole_kd,
             "prior_cart_kp": args_cli.prior_cart_kp,
             "prior_cart_kd": args_cli.prior_cart_kd,
+            "center_prior_weight": args_cli.center_prior_weight,
+            "center_cart_kp": args_cli.center_cart_kp,
+            "center_cart_kd": args_cli.center_cart_kd,
+            "center_max_lean": args_cli.center_max_lean,
+            "center_safe_angle": args_cli.center_safe_angle,
+            "center_safe_pole_vel": args_cli.center_safe_pole_vel,
+            "center_edge_threshold": args_cli.center_edge_threshold,
+            "center_edge_full_activation": args_cli.center_edge_full_activation,
+            "center_edge_max_lean": args_cli.center_edge_max_lean,
+            "center_edge_weight_boost": args_cli.center_edge_weight_boost,
+            "center_edge_velocity_lookahead": args_cli.center_edge_velocity_lookahead,
+            "staged_control": args_cli.staged_control,
+            "balance_center_scale": args_cli.balance_center_scale,
+            "recenter_enter_pos": args_cli.recenter_enter_pos,
+            "recenter_enter_velocity_lookahead": args_cli.recenter_enter_velocity_lookahead,
+            "recenter_exit_pos": args_cli.recenter_exit_pos,
+            "recenter_exit_velocity": args_cli.recenter_exit_velocity,
+            "rescue_enter_angle": args_cli.rescue_enter_angle,
+            "rescue_enter_pole_vel": args_cli.rescue_enter_pole_vel,
+            "rescue_exit_angle": args_cli.rescue_exit_angle,
+            "rescue_exit_pole_vel": args_cli.rescue_exit_pole_vel,
+            "rescue_exit_stable_steps": args_cli.rescue_exit_stable_steps,
             "edge_rescue_weight": args_cli.edge_rescue_weight,
             "edge_rescue_threshold": args_cli.edge_rescue_threshold,
             "edge_rescue_velocity_threshold": args_cli.edge_rescue_velocity_threshold,
             "edge_rescue_return_action": args_cli.edge_rescue_return_action,
             "edge_rescue_prior_suppression": args_cli.edge_rescue_prior_suppression,
             "edge_rescue_gate_scale": args_cli.edge_rescue_gate_scale,
+            "disturbance_start_step": args_cli.disturbance_start_step,
+            "disturbance_interval": args_cli.disturbance_interval,
+            "disturbance_count": args_cli.disturbance_count,
+            "disturbance_min": args_cli.disturbance_min,
+            "disturbance_max": args_cli.disturbance_max,
+            "disturbance_require_stable": args_cli.disturbance_require_stable,
+            "disturbance_first_immediate": args_cli.disturbance_first_immediate,
+            "disturbance_stable_steps": args_cli.disturbance_stable_steps,
+            "disturbance_angle_threshold": args_cli.disturbance_angle_threshold,
+            "disturbance_pole_vel_threshold": args_cli.disturbance_pole_vel_threshold,
+            "disturbance_cart_threshold": args_cli.disturbance_cart_threshold,
+            "disturbance_cart_vel_threshold": args_cli.disturbance_cart_vel_threshold,
         },
     }
     text = json.dumps(result, indent=2)
