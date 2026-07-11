@@ -17,6 +17,10 @@ IsaacLab RGB camera
 PPO is only used as an offline data generator. It is not loaded during online deployment.
 
 <p align="center">
+  <img src="assets/lewm_isaaclab_training_inference_flow.svg" width="95%">
+</p>
+
+<p align="center">
   <img src="assets/isaaclab_lewm_near_upright.gif" width="32%">
   <img src="assets/isaaclab_lewm_bottom_swingup.gif" width="32%">
   <img src="assets/isaaclab_lewm_long_disturbance.gif" width="32%">
