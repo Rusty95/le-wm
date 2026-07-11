@@ -16,6 +16,31 @@
   <img src="assets/lewm.gif" width="80%">
 </p>
 
+## IsaacLab Cartpole Deployment
+
+We also validated a LeWM-driven Cartpole controller in IsaacLab. The current
+best deployment path uses a frozen LeWM encoder plus a lightweight latent
+policy head. PPO is used only to generate offline training data; it is not
+loaded during online control.
+
+<p align="center">
+  <img src="assets/isaaclab_lewm_near_upright.gif" width="32%">
+  <img src="assets/isaaclab_lewm_bottom_swingup.gif" width="32%">
+  <img src="assets/isaaclab_lewm_long_disturbance.gif" width="32%">
+</p>
+
+<p align="center">
+  <b>Near-upright balance</b> &nbsp; | &nbsp;
+  <b>Bottom swing-up</b> &nbsp; | &nbsp;
+  <b>Stable control with disturbances</b>
+</p>
+
+Reproduction commands are in
+[`docs/LEWM_ISAACLAB_REPRODUCTION.md`](docs/LEWM_ISAACLAB_REPRODUCTION.md).
+The exploration history and why we switched from MPC/probe variants to the
+latent policy head are recorded in
+[`docs/LEWM_ISAACLAB_EXPLORATION_LOG.md`](docs/LEWM_ISAACLAB_EXPLORATION_LOG.md).
+
 If you find this code useful, please reference it in your paper:
 ```
 @article{maes_lelidec2026lewm,
