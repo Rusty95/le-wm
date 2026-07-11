@@ -35,6 +35,7 @@ optimizer:
   weight_decay: 1e-3
 
 num_preds: 1
+training_mode: single_step
 
 loss:
   sigreg:

@@ -317,6 +317,34 @@ class StateProbe(torch.nn.Module):
         return self.forward_normalized(emb) * self.target_std + self.target_mean
 
 
+class LatentPolicyHead(torch.nn.Module):
+    def __init__(
+        self,
+        input_dim: int = 576,
+        hidden_dim: int = 256,
+        action_dim: int = 1,
+        action_low: float = -1.0,
+        action_high: float = 1.0,
+    ):
+        super().__init__()
+        self.net = torch.nn.Sequential(
+            torch.nn.LayerNorm(input_dim),
+            torch.nn.Linear(input_dim, hidden_dim),
+            torch.nn.GELU(),
+            torch.nn.Linear(hidden_dim, hidden_dim),
+            torch.nn.GELU(),
+            torch.nn.Linear(hidden_dim, action_dim),
+        )
+        self.action_low = float(action_low)
+        self.action_high = float(action_high)
+
+    def forward(self, emb: torch.Tensor) -> torch.Tensor:
+        action = torch.tanh(self.net(emb))
+        scale = 0.5 * (self.action_high - self.action_low)
+        bias = 0.5 * (self.action_high + self.action_low)
+        return action * scale + bias
+
+
 def load_state_probe(path: Path, device: torch.device | str) -> StateProbe:
     payload = torch.load(path, map_location="cpu")
     config = payload.get("config", {})
@@ -334,3 +362,21 @@ def load_state_probe(path: Path, device: torch.device | str) -> StateProbe:
     probe.to(device)
     probe.eval()
     return probe
+
+
+def load_latent_policy_head(path: Path, device: torch.device | str) -> LatentPolicyHead:
+    payload = torch.load(path, map_location="cpu")
+    config = payload.get("config", {})
+    policy = LatentPolicyHead(
+        input_dim=int(config.get("input_dim", 576)),
+        hidden_dim=int(config.get("hidden_dim", 256)),
+        action_dim=int(config.get("action_dim", 1)),
+        action_low=float(config.get("action_low", -1.0)),
+        action_high=float(config.get("action_high", 1.0)),
+    )
+    state = payload["state_dict"] if "state_dict" in payload else payload
+    policy.load_state_dict(state)
+    policy.config = config
+    policy.to(device)
+    policy.eval()
+    return policy

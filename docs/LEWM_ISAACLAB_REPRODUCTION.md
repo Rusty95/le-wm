@@ -2,12 +2,67 @@
 
 本文档用于在其它机器上复现当前 LeWM + IsaacLab 的主要成果。只保留最终采用的策略、脚本、命令和关键结果；中途讨论和废弃路线不再展开。
 
+## Current Recommended Path
+
+当前最优部署路径已经从 MPC 切换为：
+
+```text
+LeWM encoder + latent policy head
+```
+
+运行时不加载 PPO。PPO/swing-up policy 只作为离线数据来源；在线控制时，
+IsaacLab 相机图像先进入 LeWM encoder，最近 3 帧 latent 拼接后送入
+`LatentPolicyHead`，直接输出 action。
+
+关键产物：
+
+```text
+LeWM checkpoint:
+  /home/hall/code/.stable-wm/checkpoints/lewm_full_angle_multistep_h10/weights_epoch_100.pt
+
+Latent policy head:
+  /home/hall/code/.stable-wm/checkpoints/lewm_full_angle_latent_policy.pt
+```
+
+核心脚本：
+
+```text
+scripts/run_multistep_training_h10.sh
+scripts/train_cartpole_latent_policy.py
+scripts/isaaclab_lewm_policy_cartpole.py
+```
+
+实测结果：
+
+```text
+near-upright deployment:
+  survival_steps      300 / 300
+  reward_sum          1231.06
+  mean_abs_pole_angle 0.0647 rad
+
+bottom deployment:
+  survival_steps      300 / 300
+  reward_sum          714.07
+  mean_abs_pole_angle 1.094 rad
+
+long disturbance deployment:
+  survival_steps      1200 / 1200
+  reward_sum          3647.48
+  first disturbance recovered after 309 steps
+```
+
+探索过程和路线切换原因见：
+
+```text
+docs/LEWM_ISAACLAB_EXPLORATION_LOG.md
+```
+
 当前成果分为四层：
 
 1. IsaacLab 采集 Cartpole RGB camera 数据。
 2. LeWM 在 IsaacLab 数据上离线训练和评估。
 3. LeWM checkpoint 在 IsaacLab 进程内在线推理。
-4. LeWM-only MPC 初步脱离 PPO 控制 Cartpole。
+4. LeWM latent policy head 脱离 PPO 控制 Cartpole。
 
 ## 1. 代码与环境
 
@@ -377,7 +432,137 @@ python scripts/make_rollout_comparison_gif.py \
   --out /home/hall/code/.stable-wm/visualizations/lewm_mixed_balanced_policy_camera_test_10k_rollout_compare.gif
 ```
 
-## 5. IsaacLab 内在线部署评估
+## 5. 当前推荐：Latent Policy Head 部署
+
+### 5.1 训练 H10 多步 LeWM
+
+当前推荐使用 autoregressive H10 多步训练：
+
+```bash
+source /home/hall/code/activate_lewm.sh
+cd /home/hall/code/le-wm
+
+bash scripts/run_multistep_training_h10.sh
+```
+
+期望 checkpoint：
+
+```text
+/home/hall/code/.stable-wm/checkpoints/lewm_full_angle_multistep_h10/weights_epoch_100.pt
+```
+
+### 5.2 训练 Latent Policy Head
+
+冻结 LeWM，只训练一个轻量 MLP，把最近 3 帧 latent 映射到 action：
+
+```bash
+source /home/hall/code/activate_lewm.sh
+cd /home/hall/code/le-wm
+
+python scripts/train_cartpole_latent_policy.py \
+  --checkpoint /home/hall/code/.stable-wm/checkpoints/lewm_full_angle_multistep_h10/weights_epoch_100.pt \
+  --train-data /home/hall/code/.stable-wm/datasets/isaaclab_full_angle_120k.h5 \
+  --test-data /home/hall/code/.stable-wm/datasets/isaaclab_full_angle_test_10k_seed9317.h5 \
+  --action-stats-h5 /home/hall/code/.stable-wm/datasets/isaaclab_full_angle_120k.h5 \
+  --cache-dir /home/hall/code/.stable-wm \
+  --encode-batch-size 128 \
+  --train-batch-size 1024 \
+  --epochs 80 \
+  --history-size 3 \
+  --hidden-dim 256 \
+  --out /home/hall/code/.stable-wm/checkpoints/lewm_full_angle_latent_policy.pt \
+  --metrics-out /home/hall/code/.stable-wm/eval/lewm_full_angle_latent_policy_eval.json \
+  --device auto
+```
+
+参考离线结果：
+
+```text
+test MAE          0.160
+sign match        74.7%
+target action std 0.330
+pred action std   0.224
+```
+
+### 5.3 IsaacLab 在线部署
+
+近竖直初始：
+
+```bash
+source /home/hall/miniconda3/etc/profile.d/conda.sh
+conda activate env_isaaclab
+export PYTHONPATH=/home/hall/code/le-wm:/home/hall/code/RL-Learning-BasedOn-IsaacLab/source/rl_lab_learning:${PYTHONPATH:-}
+export LD_PRELOAD=${LD_PRELOAD:+$LD_PRELOAD:}/lib/aarch64-linux-gnu/libgomp.so.1
+cd /home/hall/code
+
+python le-wm/scripts/isaaclab_lewm_policy_cartpole.py \
+  --task RLLab-Cartpole-SwingUp-RGB-Camera-Direct-v0 \
+  --checkpoint /home/hall/code/.stable-wm/checkpoints/lewm_full_angle_multistep_h10/weights_epoch_100.pt \
+  --policy-head /home/hall/code/.stable-wm/checkpoints/lewm_full_angle_latent_policy.pt \
+  --action-stats-h5 /home/hall/code/.stable-wm/datasets/isaaclab_full_angle_120k.h5 \
+  --episodes 1 \
+  --episode-len 300 \
+  --episode-length-s 25 \
+  --initial-pole-angle-range -0.25 0.25 \
+  --high-contrast-scene \
+  --save-gif \
+  --gif-out /home/hall/code/.stable-wm/visualizations/lewm_latent_policy_near_upright.gif \
+  --out /home/hall/code/.stable-wm/eval/lewm_latent_policy_near_upright.json \
+  --seed 9317 \
+  --device cuda:0
+```
+
+底部附近初始：
+
+```bash
+python le-wm/scripts/isaaclab_lewm_policy_cartpole.py \
+  --task RLLab-Cartpole-SwingUp-RGB-Camera-Direct-v0 \
+  --checkpoint /home/hall/code/.stable-wm/checkpoints/lewm_full_angle_multistep_h10/weights_epoch_100.pt \
+  --policy-head /home/hall/code/.stable-wm/checkpoints/lewm_full_angle_latent_policy.pt \
+  --action-stats-h5 /home/hall/code/.stable-wm/datasets/isaaclab_full_angle_120k.h5 \
+  --episodes 1 \
+  --episode-len 300 \
+  --episode-length-s 25 \
+  --initial-pole-angle-range 2.8 3.14 \
+  --high-contrast-scene \
+  --save-gif \
+  --gif-out /home/hall/code/.stable-wm/visualizations/lewm_latent_policy_bottom.gif \
+  --out /home/hall/code/.stable-wm/eval/lewm_latent_policy_bottom.json \
+  --seed 9317 \
+  --device cuda:0
+```
+
+稳定后扰动长测：
+
+```bash
+python le-wm/scripts/isaaclab_lewm_policy_cartpole.py \
+  --task RLLab-Cartpole-SwingUp-RGB-Camera-Direct-v0 \
+  --checkpoint /home/hall/code/.stable-wm/checkpoints/lewm_full_angle_multistep_h10/weights_epoch_100.pt \
+  --policy-head /home/hall/code/.stable-wm/checkpoints/lewm_full_angle_latent_policy.pt \
+  --action-stats-h5 /home/hall/code/.stable-wm/datasets/isaaclab_full_angle_120k.h5 \
+  --episodes 1 \
+  --episode-len 1200 \
+  --episode-length-s 100 \
+  --initial-pole-angle-range -0.25 0.25 \
+  --disturbance-start-step 60 \
+  --disturbance-interval 160 \
+  --disturbance-count 5 \
+  --disturbance-min 2.4 \
+  --disturbance-max 6.0 \
+  --disturbance-stable-steps 60 \
+  --disturbance-angle-threshold 0.15 \
+  --disturbance-pole-vel-threshold 0.8 \
+  --disturbance-cart-threshold 0.8 \
+  --disturbance-cart-vel-threshold 0.5 \
+  --high-contrast-scene \
+  --save-gif \
+  --gif-out /home/hall/code/.stable-wm/visualizations/lewm_latent_policy_long_disturbance.gif \
+  --out /home/hall/code/.stable-wm/eval/lewm_latent_policy_long_disturbance.json \
+  --seed 9317 \
+  --device cuda:0
+```
+
+## 6. Legacy: IsaacLab 内在线部署评估
 
 在线评估脚本：
 
@@ -422,7 +607,7 @@ horizon_3_mse: 0.03185
 - 直接使用 `transformers.ViTModel + jepa.JEPA + module.py` 复原模型。
 - `lewm_isaaclab_common.py` 会自适应不同 `transformers` 版本的 ViT key 命名。
 
-## 6. LeWM-only MPC 控制 Cartpole
+## 7. Legacy: LeWM-only MPC 控制 Cartpole
 
 最终实现了第一版脱离 PPO 的控制闭环：
 
@@ -545,9 +730,9 @@ mean_abs_pole_angle: 0.758
 
 结论：LeWM-only 控制链路已经跑通，确实可以不加载 PPO 产生动作；但当前还不能称为稳定控制。短 horizon 比长 horizon 更好，说明模型误差累积和 CEM 利用模型偏差已经出现。
 
-## 7. 易错点
+## 8. 易错点
 
-### 7.1 双环境不要混装
+### 8.1 双环境不要混装
 
 不要把 LeWM 训练依赖全装进 IsaacLab 环境。IsaacLab 侧保持轻依赖更稳。
 
@@ -561,7 +746,7 @@ loguru
 
 它直接复原模型结构并加载 `state_dict`。
 
-### 7.2 GPU 在 sandbox 中可能不可见
+### 8.2 GPU 在 sandbox 中可能不可见
 
 如果普通 shell 里 `torch.cuda.is_available()` 是 `False`，但 IsaacLab 或训练需要 GPU，应在真实终端或允许 GPU 的环境中运行。
 
@@ -574,7 +759,7 @@ Minimum and Maximum cuda capability supported by this version of PyTorch is (8.0
 
 目前 smoke test 可以跑，但长时间训练/部署最好确认 PyTorch 与 CUDA capability 匹配。
 
-### 7.3 IsaacLab 异常退出可能卡住
+### 8.3 IsaacLab 异常退出可能卡住
 
 Isaac Sim 在 Python 异常路径里可能卡住。调试命令建议套 `timeout`：
 
@@ -589,7 +774,7 @@ pkill -f isaaclab_lewm_mpc_cartpole.py
 pkill -f isaaclab_lewm_online_eval.py
 ```
 
-### 7.4 100x100 图像可以训练，但不是最终上限
+### 8.4 100x100 图像可以训练，但不是最终上限
 
 当前采集图像是：
 
@@ -599,11 +784,11 @@ pixels: (N, 100, 100, 3)
 
 训练前 resize 到 `224x224` 进入 ViT。这个分辨率能跑通验证，但如果 pole 很细或视角不理想，模型鲁棒性会受影响。
 
-### 7.5 `policy_obs` 只在 policy 数据里有
+### 8.5 `policy_obs` 只在 policy 数据里有
 
 `isaaclab_policy_camera_50k.h5` 和 test 10k 有 `policy_obs`，random 100k 当前没有。训练 state probe 必须用带 `policy_obs` 的数据。
 
-### 7.6 `action` 必须使用训练时一致的 z-score
+### 8.6 `action` 必须使用训练时一致的 z-score
 
 在线部署和 MPC 使用 mixed training action stats：
 
@@ -614,7 +799,7 @@ isaaclab_policy_camera_50k.h5
 
 不要直接把 raw action 当成 LeWM action embedding 输入。
 
-### 7.7 Gymnasium 仍然是 IsaacLab RL 入口
+### 8.7 Gymnasium 仍然是 IsaacLab RL 入口
 
 IsaacLab 当前仍大量使用：
 
@@ -630,7 +815,7 @@ obs, reward, terminated, truncated, info = env.step(action)
 done = terminated | truncated
 ```
 
-## 8. 后续路线
+## 9. 后续路线
 
 优先级从高到低：
 

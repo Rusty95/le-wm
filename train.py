@@ -183,18 +183,43 @@ def lejepa_forward(self, batch, stage, cfg):
     emb = output["emb"]  # (B, T, D)
     act_emb = output["act_emb"]
 
-    ctx_emb = emb[:, :ctx_len]
-    ctx_act = act_emb[:, : ctx_len]
+    training_mode = cfg.get("training_mode", "single_step")
+    if training_mode == "autoregressive":
+        if emb.shape[1] < ctx_len + n_preds:
+            raise ValueError(
+                f"Autoregressive training needs at least history_size + num_preds frames, "
+                f"got {emb.shape[1]} < {ctx_len + n_preds}."
+            )
 
-    tgt_emb = emb[:, n_preds:] # label
-    pred_emb = self.model.predict(ctx_emb, ctx_act) # pred
+        rollout_emb = emb[:, :ctx_len]
+        pred_steps = []
+        for step in range(n_preds):
+            act_window = act_emb[:, step : step + ctx_len]
+            pred_step = self.model.predict(rollout_emb[:, -ctx_len:], act_window)[:, -1:]
+            pred_steps.append(pred_step)
+            rollout_emb = torch.cat([rollout_emb, pred_step], dim=1)
+
+        pred_emb = torch.cat(pred_steps, dim=1)
+        tgt_emb = emb[:, ctx_len : ctx_len + n_preds]
+    else:
+        ctx_emb = emb[:, :ctx_len]
+        ctx_act = act_emb[:, : ctx_len]
+
+        tgt_emb = emb[:, n_preds:] # label
+        pred_emb = self.model.predict(ctx_emb, ctx_act) # pred
 
     # LeWM loss. External disturbances are not part of the policy action, so
     # the transition on which an impulse is injected can be excluded while
     # retaining all subsequent recovery dynamics.
     pred_error = (pred_emb - tgt_emb).pow(2).mean(dim=-1)
     if "prediction_valid" in batch:
-        pred_valid = batch["prediction_valid"][:, : pred_emb.shape[1]].to(
+        if training_mode == "autoregressive":
+            valid_start = max(ctx_len - 1, 0)
+            valid_end = valid_start + pred_emb.shape[1]
+            pred_valid_src = batch["prediction_valid"][:, valid_start:valid_end]
+        else:
+            pred_valid_src = batch["prediction_valid"][:, : pred_emb.shape[1]]
+        pred_valid = pred_valid_src.to(
             device=pred_error.device,
             dtype=pred_error.dtype,
         )
